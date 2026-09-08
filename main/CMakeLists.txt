@@ -1,0 +1,75 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "lvgl_port.c"
+        "lcd_st7789_official.c"
+        "watch_face.c"
+        "watch_settings.c"
+        "watch_ui.c"
+        "watch_keys.c"
+        "watch_menu.c"
+        "watch_tomato_clock.c"
+        "watch_game.c"
+        "watch_plane_war.c"
+        "watch_plane_war_over.c"
+        "watch_plane_war_scores.c"
+        "watch_bili_stats.c"
+        "watch_config.c"
+        "watch_serial_config.c"
+        "watch_e_card.c"
+        "watch_weather.c"
+        "watch_compass.c"
+        "qmc5883p_port.c"
+        "qmc5883p.c"
+        "time_sync.c"
+        "watch_wifi.c"
+        "watch_rtc.c"
+        "watch_battery.c"
+        "watch_bmi270.c"
+        "watch_language.c"
+        "fonts/font_sj_narrow_80.c"
+        "fonts/font_sj_narrow_54.c"
+        "fonts/font_100.c"
+        "fonts/cn_font_26.c"
+        "fonts/cn_font_20.c"
+        "picture_c/cover.c"
+        "picture_c/back_icon.c"
+        "picture_c/tomato_clock_icon.c"
+        "picture_c/game_icon.c"
+        "picture_c/e_card_icon.c"
+        "picture_c/weather_icon.c"
+        "picture_c/compass_icon.c"
+        "picture_c/our_jet.c"
+        "picture_c/hostile_jet.c"
+        "picture_c/heart.c"
+        "picture_c/plane_war_bg.c"
+        "picture_c/return_img.c"
+        "picture_c/play_again_img.c"
+        "picture_c/game_scores_img.c"
+        "picture_c/game_over_img.c"
+        "picture_c/bilibili_img.c"
+        "picture_c/QR_code.c"
+        "picture_c/views_img.c"
+        "picture_c/likes_img.c"    
+        "picture_c/subscribers_img.c"    
+        "picture_c/weather_bg.c"    
+        "picture_c/settings_bg.c"    
+        "picture_c/menu_bg.c"    
+        
+    INCLUDE_DIRS "."
+
+    REQUIRES
+        json
+        esp_http_client
+        mbedtls
+        esp_lcd
+        lvgl
+        freertos
+        driver
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        esp_timer
+)
+
