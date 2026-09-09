@@ -510,7 +510,7 @@ static void switch_game_to_menu(void)
 
 static void switch_to_e_card(void)
 {
-    /* 从菜单进入电子名片页面。
+    /* 从菜单进入设备信息页面。
      */
     if(s_ui.page != UI_PAGE_MENU || !ui_begin_switch(UI_PAGE_E_CARD)) {
         return;
@@ -529,13 +529,13 @@ static void switch_to_e_card(void)
 
 static void switch_e_card_to_menu(void)
 {
-    /* 从电子名片返回菜单。
+    /* 从设备信息返回菜单。
      */
     if(s_ui.page != UI_PAGE_E_CARD || !ui_begin_switch(UI_PAGE_MENU)) {
         return;
     }
 
-    /* 返回菜单时保留电子名片图标位置。 */
+    /* 返回菜单时保留设备信息图标位置。 */
     lv_obj_set_y(s_ui.menu_page, 0);
     lv_obj_set_y(s_ui.e_card_page, 0);
 

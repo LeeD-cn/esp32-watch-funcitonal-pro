@@ -6,7 +6,7 @@
  * ==================== 模块说明 ====================
  *  * 模块职责：
  * - 主菜单页面，负责菜单标题、图标切换和底部滑动指示器。
- * - 菜单项包含返回、番茄钟、游戏、电子名片、天气和指南针。
+ * - 菜单项包含返回、番茄钟、游戏、设备信息、天气和指南针。
  * - 页面支持中英文标题切换，字体根据当前语言选择中文字体或 Montserrat。
  * - 底部滑块根据当前 index 计算位置，用于提示用户当前所在菜单项。
  *
@@ -53,6 +53,7 @@
 #define MENU_SLIDER_Y           222
 
 LV_FONT_DECLARE(cn_font_26);
+LV_FONT_DECLARE(device_info_font_20);
 LV_IMG_DECLARE(menu_bg);
 
 /**
@@ -86,7 +87,7 @@ static const menu_title_i18n_t s_menu_titles[MENU_ITEM_COUNT] = {
     {"Back", "返回"},
     {"Tomato Clock", "番茄钟"},
     {"Game", "游戏"},
-    {"E-Card", "电子名片"},
+    {"Device Info", "设备信息"},
     {"Weather", "天气"},
     {"Compass", "指南针"},
 };
@@ -122,6 +123,9 @@ static const char *menu_title_text(uint8_t index)
  */
 static const lv_font_t *menu_title_font(void)
 {
+    if(watch_language_is_chinese() && s_menu.index == 3) {
+        return &device_info_font_20;
+    }
     return watch_language_is_chinese() ? &cn_font_26 : &lv_font_montserrat_26;
 }
 
@@ -445,10 +449,10 @@ bool watch_menu_is_game_selected(void)
 }
 
 /**
- * @brief 判断当前是否选中电子名片。
+ * @brief 判断当前是否选中设备信息。
  *
  * 详细说明：
- * - 供主 UI 路由到电子名片页面。
+ * - 供主 UI 路由到设备信息页面。
  *
  * @return 函数执行结果或计算得到的值，具体语义见返回路径。
  */

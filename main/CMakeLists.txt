@@ -13,8 +13,8 @@ idf_component_register(
         "watch_plane_war.c"
         "watch_plane_war_over.c"
         "watch_plane_war_scores.c"
-        "watch_bili_stats.c"
         "watch_config.c"
+        "watch_device_info.c"
         "watch_serial_config.c"
         "watch_e_card.c"
         "watch_weather.c"
@@ -32,6 +32,7 @@ idf_component_register(
         "fonts/font_100.c"
         "fonts/cn_font_26.c"
         "fonts/cn_font_20.c"
+        "fonts/device_info_font_20.c"
         "picture_c/cover.c"
         "picture_c/back_icon.c"
         "picture_c/tomato_clock_icon.c"
@@ -47,11 +48,6 @@ idf_component_register(
         "picture_c/play_again_img.c"
         "picture_c/game_scores_img.c"
         "picture_c/game_over_img.c"
-        "picture_c/bilibili_img.c"
-        "picture_c/QR_code.c"
-        "picture_c/views_img.c"
-        "picture_c/likes_img.c"    
-        "picture_c/subscribers_img.c"    
         "picture_c/weather_bg.c"    
         "picture_c/settings_bg.c"    
         "picture_c/menu_bg.c"    
@@ -72,4 +68,3 @@ idf_component_register(
         nvs_flash
         esp_timer
 )
-

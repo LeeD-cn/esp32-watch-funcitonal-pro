@@ -36,6 +36,7 @@
 #endif
 
 #include "watch_config.h"
+#include "watch_device_info.h"
 
 /* 大图采用 watch_config.c 的流式写入接口，避免占用大块连续 RAM。 */
 extern esp_err_t watch_config_image_stream_begin(const char *name, int w, int h, size_t size);
@@ -301,17 +302,56 @@ static bool json_get_string_if_present(cJSON *root,
     return true;
 }
 
+static bool json_get_ascii_string_if_present(cJSON *root,
+                                             const char *key,
+                                             char *dst,
+                                             size_t dst_size,
+                                             size_t max_len)
+{
+    cJSON *item = cJSON_GetObjectItem(root, key);
+    if(item == NULL) {
+        return true;
+    }
+    if(!cJSON_IsString(item) || item->valuestring == NULL) {
+        reply_simple(false, "invalid string field");
+        return false;
+    }
+
+    size_t len = strlen(item->valuestring);
+    if(len >= max_len || len >= dst_size) {
+        reply_simple(false, "string too long");
+        return false;
+    }
+    for(size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)item->valuestring[i];
+        if(ch < 0x20 || ch > 0x7e) {
+            reply_simple(false, "owner and device_name require ASCII");
+            return false;
+        }
+    }
+
+    memcpy(dst, item->valuestring, len + 1);
+    return true;
+}
+
 /**
- * @brief 处理 set_config 命令并保存 Wi-Fi、B站和天气配置。
+ * @brief 处理 set_config 命令并保存联网配置和设备信息。
  */
 static bool handle_set_config(cJSON *root)
 {
     /* 处理配置写入命令：先加载旧配置，再用 JSON 中存在的字段覆盖，最后整体保存到 NVS。
      */
     watch_config_t cfg;
+    watch_device_info_t device_info;
     esp_err_t ret = watch_config_load(&cfg);
     if(ret != ESP_OK) {
         reply_simple(false, "load config failed");
+        return false;
+    }
+
+    ret = watch_device_info_load(&device_info);
+    if(ret != ESP_OK) {
+        reply_simple(false, "load device info failed");
         return false;
     }
 
@@ -321,11 +361,25 @@ static bool handle_set_config(cJSON *root)
     if(!json_get_string_if_present(root, "sessdata", cfg.sessdata, sizeof(cfg.sessdata), WATCH_CONFIG_SESSDATA_MAX)) return false;
     if(!json_get_string_if_present(root, "latitude", cfg.latitude, sizeof(cfg.latitude), WATCH_CONFIG_COORD_MAX)) return false;
     if(!json_get_string_if_present(root, "longitude", cfg.longitude, sizeof(cfg.longitude), WATCH_CONFIG_COORD_MAX)) return false;
+    if(!json_get_ascii_string_if_present(root, "owner", device_info.owner, sizeof(device_info.owner), WATCH_DEVICE_OWNER_MAX)) return false;
+    if(!json_get_ascii_string_if_present(root, "device_name", device_info.device_name, sizeof(device_info.device_name), WATCH_DEVICE_NAME_MAX)) return false;
+
+    if(cJSON_GetObjectItem(root, "device_id") != NULL) {
+        reply_simple(false, "device_id is read only");
+        return false;
+    }
 
     ret = watch_config_save(&cfg);
     if(ret != ESP_OK) {
         ESP_LOGW(TAG, "save config failed: %s", esp_err_to_name(ret));
         reply_simple(false, "save config failed");
+        return false;
+    }
+
+    ret = watch_device_info_save(&device_info);
+    if(ret != ESP_OK) {
+        ESP_LOGW(TAG, "save device info failed: %s", esp_err_to_name(ret));
+        reply_simple(false, "save device info failed");
         return false;
     }
 
@@ -338,9 +392,16 @@ static void handle_get_config(void)
     /* 读取当前配置并以 JSON 返回。敏感字段是否完整输出取决于本函数后续构造的字段策略。
      */
     watch_config_t cfg;
+    watch_device_info_t device_info;
     esp_err_t ret = watch_config_load(&cfg);
     if(ret != ESP_OK) {
         reply_simple(false, "load config failed");
+        return;
+    }
+
+    ret = watch_device_info_load(&device_info);
+    if(ret != ESP_OK) {
+        reply_simple(false, "load device info failed");
         return;
     }
 
@@ -357,6 +418,9 @@ static void handle_get_config(void)
     cJSON_AddStringToObject(root, "bili_uid", cfg.bili_uid);
     cJSON_AddStringToObject(root, "latitude", cfg.latitude);
     cJSON_AddStringToObject(root, "longitude", cfg.longitude);
+    cJSON_AddStringToObject(root, "owner", device_info.owner);
+    cJSON_AddStringToObject(root, "device_name", device_info.device_name);
+    cJSON_AddStringToObject(root, "device_id", device_info.device_id);
     cJSON_AddBoolToObject(root, "has_wifi_pass", cfg.wifi_pass[0] != '\0');
     cJSON_AddBoolToObject(root, "has_sessdata", cfg.sessdata[0] != '\0');
     cJSON_AddBoolToObject(root, "has_qr_code", watch_config_image_exists("qr_code"));
@@ -628,6 +692,9 @@ static void handle_command(cJSON *root)
         handle_get_config();
     } else if(strcmp(cmd, "clear_config") == 0) {
         esp_err_t ret = watch_config_clear_all();
+        if(ret == ESP_OK) {
+            ret = watch_device_info_clear();
+        }
         if(ret == ESP_OK) {
             reply_simple(true, "rebooting");
             vTaskDelay(pdMS_TO_TICKS(200));
