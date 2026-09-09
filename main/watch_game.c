@@ -21,6 +21,7 @@
 #include "watch_plane_war.h"
 #include "watch_plane_war_over.h"
 #include "watch_plane_war_scores.h"
+#include "watch_snake.h"
 #include "watch_language.h"
 
 #include <stdbool.h>
@@ -43,7 +44,14 @@
 #define GAME_PLANE_BG_H     44
 #define GAME_PLANE_BG_R     10
 
+#define GAME_SNAKE_BG_X     24
+#define GAME_SNAKE_BG_Y     128
+#define GAME_SNAKE_BG_W     192
+#define GAME_SNAKE_BG_H     44
+#define GAME_SNAKE_BG_R     10
+
 LV_FONT_DECLARE(cn_font_26);
+LV_FONT_DECLARE(snake_menu_font_26);
 
 /**
  * @brief 游戏菜单可聚焦项。
@@ -51,6 +59,8 @@ LV_FONT_DECLARE(cn_font_26);
 typedef enum {
     GAME_FOCUS_BACK = 0,
     GAME_FOCUS_PLANE_WAR,
+    GAME_FOCUS_SNAKE,
+    GAME_FOCUS_COUNT,
 } game_focus_t;
 
 /**
@@ -61,6 +71,7 @@ typedef enum {
     GAME_MODE_PLANE_WAR,
     GAME_MODE_PLANE_WAR_OVER,
     GAME_MODE_PLANE_WAR_SCORES,
+    GAME_MODE_SNAKE,
 } game_mode_t;
 
 /**
@@ -74,10 +85,13 @@ typedef struct {
 
     lv_obj_t *plane_bg;
     lv_obj_t *plane_label;
+    lv_obj_t *snake_bg;
+    lv_obj_t *snake_label;
 
     lv_obj_t *plane_war_page;
     lv_obj_t *plane_war_over_page;
     lv_obj_t *plane_war_scores_page;
+    lv_obj_t *snake_page;
 
     int pending_plane_war_score;
     bool has_pending_plane_war_score;
@@ -122,6 +136,16 @@ static void game_apply_language(void)
         lv_label_set_text(s_game.plane_label, watch_language_is_chinese() ? "飞机大战" : "Plane War");
         lv_obj_center(s_game.plane_label);
     }
+
+    if(s_game.snake_label) {
+        lv_obj_set_style_text_font(s_game.snake_label,
+                                   watch_language_is_chinese() ? &snake_menu_font_26
+                                                               : &lv_font_montserrat_26,
+                                   0);
+        lv_label_set_text_static(s_game.snake_label,
+                                 watch_language_is_chinese() ? "贪吃蛇" : "Snake");
+        lv_obj_center(s_game.snake_label);
+    }
 }
 
 /**
@@ -158,6 +182,9 @@ static lv_obj_t *game_obj_from_focus(game_focus_t focus)
 
     case GAME_FOCUS_PLANE_WAR:
         return s_game.plane_label;
+
+    case GAME_FOCUS_SNAKE:
+        return s_game.snake_label;
 
     default:
         return NULL;
@@ -278,6 +305,10 @@ static void game_cursor_update(bool animated)
         x += lv_obj_get_x(s_game.plane_bg);
         y += lv_obj_get_y(s_game.plane_bg);
     }
+    else if(s_game.focus == GAME_FOCUS_SNAKE && s_game.snake_bg) {
+        x += lv_obj_get_x(s_game.snake_bg);
+        y += lv_obj_get_y(s_game.snake_bg);
+    }
 
     x -= GAME_SELECTOR_PAD_X;
     y -= GAME_SELECTOR_PAD_Y;
@@ -315,6 +346,9 @@ static void game_selection_update(bool animated)
     if(s_game.plane_bg) {
         lv_obj_set_style_bg_opa(s_game.plane_bg, LV_OPA_30, 0);
     }
+    if(s_game.snake_bg) {
+        lv_obj_set_style_bg_opa(s_game.snake_bg, LV_OPA_30, 0);
+    }
 
     if(s_game.cursor) {
         lv_obj_clear_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
@@ -348,6 +382,14 @@ static void game_destroy_plane_war_scores(void)
     if(s_game.plane_war_scores_page) {
         watch_plane_war_scores_destroy();
         s_game.plane_war_scores_page = NULL;
+    }
+}
+
+static void game_destroy_snake(void)
+{
+    if(s_game.snake_page) {
+        watch_snake_destroy();
+        s_game.snake_page = NULL;
     }
 }
 
@@ -417,6 +459,7 @@ static void game_show_menu_mode(void)
 
     game_destroy_plane_war_over();
     game_destroy_plane_war_scores();
+    game_destroy_snake();
 
 
     if(s_game.plane_war_page) {
@@ -429,6 +472,7 @@ static void game_show_menu_mode(void)
     lv_obj_clear_flag(s_game.back_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_game.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_game.plane_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_game.snake_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
 
     game_apply_language();
@@ -445,6 +489,7 @@ static void game_show_plane_war_mode(void)
 {
     game_destroy_plane_war_over();
     game_destroy_plane_war_scores();
+    game_destroy_snake();
 
     if(s_game.plane_war_page == NULL) {
         s_game.plane_war_page = watch_plane_war_create(s_game.page);
@@ -458,12 +503,45 @@ static void game_show_plane_war_mode(void)
     lv_obj_add_flag(s_game.back_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.plane_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.snake_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_clear_flag(s_game.plane_war_page, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_game.plane_war_page);
 
     watch_plane_war_start();
+}
+
+static void game_show_snake_mode(void)
+{
+    game_destroy_plane_war_over();
+    game_destroy_plane_war_scores();
+
+    if(s_game.plane_war_page) {
+        watch_plane_war_destroy();
+        s_game.plane_war_page = NULL;
+    }
+    else {
+        watch_plane_war_stop();
+    }
+
+    if(s_game.snake_page == NULL) {
+        s_game.snake_page = watch_snake_create(s_game.page);
+        if(s_game.snake_page == NULL) {
+            game_show_menu_mode();
+            return;
+        }
+    }
+
+    s_game.mode = GAME_MODE_SNAKE;
+    lv_obj_add_flag(s_game.back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.plane_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.snake_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_game.snake_page, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_game.snake_page);
+    watch_snake_reset();
 }
 
 /**
@@ -495,6 +573,7 @@ static void game_show_plane_war_over_mode(void)
     lv_obj_add_flag(s_game.back_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.plane_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.snake_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
 
     if(s_game.plane_war_over_page == NULL) {
@@ -527,6 +606,7 @@ static void game_show_plane_war_scores_mode(void)
     lv_obj_add_flag(s_game.back_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.plane_bg, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_game.snake_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_game.cursor, LV_OBJ_FLAG_HIDDEN);
 
     if(s_game.plane_war_page) {
@@ -612,6 +692,29 @@ lv_obj_t *watch_game_create(lv_obj_t *parent)
     lv_label_set_text(s_game.plane_label, watch_language_is_chinese() ? "飞机大战" : "Plane War");
     lv_obj_center(s_game.plane_label);
 
+    s_game.snake_bg = lv_obj_create(s_game.page);
+    lv_obj_remove_style_all(s_game.snake_bg);
+    lv_obj_set_size(s_game.snake_bg, GAME_SNAKE_BG_W, GAME_SNAKE_BG_H);
+    lv_obj_set_pos(s_game.snake_bg, GAME_SNAKE_BG_X, GAME_SNAKE_BG_Y);
+    lv_obj_set_style_bg_color(s_game.snake_bg, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_game.snake_bg, LV_OPA_30, 0);
+    lv_obj_set_style_radius(s_game.snake_bg, GAME_SNAKE_BG_R, 0);
+    lv_obj_set_style_pad_all(s_game.snake_bg, 0, 0);
+    lv_obj_clear_flag(s_game.snake_bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_game.snake_bg, LV_OBJ_FLAG_CLICKABLE);
+
+    s_game.snake_label = lv_label_create(s_game.snake_bg);
+    lv_obj_set_style_text_font(s_game.snake_label,
+                               watch_language_is_chinese() ? &snake_menu_font_26
+                                                           : &lv_font_montserrat_26,
+                               0);
+    lv_obj_set_style_text_color(s_game.snake_label, lv_color_white(), 0);
+    lv_obj_set_style_text_align(s_game.snake_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_clear_flag(s_game.snake_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_label_set_text_static(s_game.snake_label,
+                             watch_language_is_chinese() ? "贪吃蛇" : "Snake");
+    lv_obj_center(s_game.snake_label);
+
     s_game.cursor = lv_obj_create(s_game.page);
     lv_obj_remove_style_all(s_game.cursor);
     lv_obj_set_size(s_game.cursor, 20, 20);
@@ -627,6 +730,7 @@ lv_obj_t *watch_game_create(lv_obj_t *parent)
     s_game.plane_war_page = NULL;
     s_game.plane_war_over_page = NULL;
     s_game.plane_war_scores_page = NULL;
+    s_game.snake_page = NULL;
     s_game.pending_plane_war_score = 0;
     s_game.has_pending_plane_war_score = false;
 
@@ -724,12 +828,26 @@ void watch_game_on_key(watch_key_t key)
         return;
     }
 
-    if(key == WATCH_KEY_1 || key == WATCH_KEY_3) {
-        if(s_game.focus == GAME_FOCUS_BACK) {
-            s_game.focus = GAME_FOCUS_PLANE_WAR;
-        } else {
-            s_game.focus = GAME_FOCUS_BACK;
+    if(s_game.mode == GAME_MODE_SNAKE) {
+        watch_snake_on_key(key);
+        if(watch_snake_wants_back()) {
+            s_game.focus = GAME_FOCUS_SNAKE;
+            game_show_menu_mode();
         }
+        return;
+    }
+
+    if(key == WATCH_KEY_1) {
+        s_game.focus = s_game.focus == GAME_FOCUS_BACK
+                     ? GAME_FOCUS_SNAKE
+                     : (game_focus_t)(s_game.focus - 1);
+
+        game_selection_update(true);
+        return;
+    }
+
+    if(key == WATCH_KEY_3) {
+        s_game.focus = (game_focus_t)((s_game.focus + 1) % GAME_FOCUS_COUNT);
 
         game_selection_update(true);
         return;
@@ -741,6 +859,9 @@ void watch_game_on_key(watch_key_t key)
         }
         else if(s_game.focus == GAME_FOCUS_PLANE_WAR) {
             game_show_plane_war_mode();
+        }
+        else if(s_game.focus == GAME_FOCUS_SNAKE) {
+            game_show_snake_mode();
         }
 
         return;
@@ -781,6 +902,11 @@ void watch_game_cleanup(void)
     if(s_game.plane_war_scores_page) {
         watch_plane_war_scores_destroy();
         s_game.plane_war_scores_page = NULL;
+    }
+
+    if(s_game.snake_page) {
+        watch_snake_destroy();
+        s_game.snake_page = NULL;
     }
 
     s_game.mode = GAME_MODE_MENU;
