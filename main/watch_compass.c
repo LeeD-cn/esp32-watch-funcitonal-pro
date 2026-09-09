@@ -20,13 +20,18 @@
 
 #include "watch_compass.h"
 #include "qmc5883p.h"
+#include "watch_bmi270.h"
+#include "watch_compass_calibration.h"
 #include "watch_language.h"
 
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "esp_log.h"
 
 LV_FONT_DECLARE(cn_font_26);
 
@@ -70,6 +75,40 @@ LV_FONT_DECLARE(cn_font_26);
 /* 圆周指数平滑系数。用向量平滑可正确处理 359° 到 0° 的跨界。 */
 #define WATCH_COMPASS_SMOOTH_ALPHA      0.24f
 
+/* 调平与运动判定。阈值是首轮真机测试起点，最终值需按阶段 5 实测调整。 */
+#define WATCH_COMPASS_GRAVITY_MIN_MG    750.0f
+#define WATCH_COMPASS_GRAVITY_MAX_MG    1250.0f
+#define WATCH_COMPASS_MOTION_DELTA_MG   180
+#define WATCH_COMPASS_STABLE_SAMPLES    2
+#define WATCH_COMPASS_LEVEL_DEG         8.0f
+#define WATCH_COMPASS_MAX_TILT_DEG      65.0f
+#define WATCH_COMPASS_GRAVITY_ALPHA     0.35f
+#define WATCH_COMPASS_LEVEL_RING_SIZE   34
+#define WATCH_COMPASS_LEVEL_DOT_TRAVEL  11.0f
+
+/* 三轴磁校准：上拨启动，15 秒内将手表绕所有轴缓慢旋转。 */
+#define WATCH_COMPASS_CAL_DURATION_MS   15000U
+#define WATCH_COMPASS_CAL_MIN_SAMPLES   40U
+#define WATCH_COMPASS_CAL_MIN_SPAN      300
+
+/* 完成三轴校准后，用磁场总强度变化识别明显的临时磁干扰。 */
+#define WATCH_COMPASS_MAG_BASE_SAMPLES  10U
+#define WATCH_COMPASS_MAG_MIN_RATIO     0.55f
+#define WATCH_COMPASS_MAG_MAX_RATIO     1.45f
+#define WATCH_COMPASS_MAG_BASE_ALPHA    0.05f
+
+/*
+ * 两颗传感器在 PCB 顶层均为 180° 安装，先按相同封装平面方向映射。
+ * 这里集中表达板级坐标：前向、右向、表面法向。真机六面测试若发现
+ * 轴交换或符号不一致，只修改这组宏，不改倾斜补偿公式。
+ */
+#define WATCH_COMPASS_MAG_FORWARD(x, y, z)       (x)
+#define WATCH_COMPASS_MAG_RIGHT(x, y, z)         (-(y))
+#define WATCH_COMPASS_MAG_NORMAL(x, y, z)        (-(z))
+#define WATCH_COMPASS_ACCEL_FORWARD(sample)      ((float)(sample).x_mg)
+#define WATCH_COMPASS_ACCEL_RIGHT(sample)        (-(float)(sample).y_mg)
+#define WATCH_COMPASS_ACCEL_NORMAL(sample)       (-(float)(sample).z_mg)
+
 /**
  * @brief 地磁偏角配置, 单位为度.
  *
@@ -87,26 +126,6 @@ LV_FONT_DECLARE(cn_font_26);
  */
 #ifndef WATCH_COMPASS_MOUNT_OFFSET_DEG
 #define WATCH_COMPASS_MOUNT_OFFSET_DEG  15.0f
-#endif
-
-/**
- * @brief 正北方向分量映射.
- *
- * @note 默认认为 QMC5883P 的 X+ 方向指向表盘上方, 也就是手表正前方.
- * @note 模块安装方向不同，可调整这里的轴映射.
- */
-#ifndef WATCH_COMPASS_NORTH_COMPONENT
-#define WATCH_COMPASS_NORTH_COMPONENT(x, y)     (x)
-#endif
-
-/**
- * @brief 正东方向分量映射.
- *
- * @note 当前实测方向反了，因此把 Y 轴取反，使角度按顺时针从 0 度增加到 360 度.
- * @note 模块安装方向变化时，可调整这里的轴映射.
- */
-#ifndef WATCH_COMPASS_EAST_COMPONENT
-#define WATCH_COMPASS_EAST_COMPONENT(x, y)      (-(y))
 #endif
 
 /**
@@ -159,6 +178,10 @@ typedef struct {
      */
     lv_obj_t *center_dot;
 
+    /* 中心调平环；center_dot 在环内随重力方向移动。 */
+    lv_obj_t *level_ring;
+    lv_obj_t *level_label;
+
     /**
      * @brief 屏幕顶部固定朝向基准.
      */
@@ -192,16 +215,50 @@ typedef struct {
     float heading_filter_x;
     float heading_filter_y;
 
+    bool accel_last_valid;
+    int16_t accel_last_x;
+    int16_t accel_last_y;
+    int16_t accel_last_z;
+    uint8_t accel_stable_samples;
+    bool gravity_filter_ready;
+    float gravity_forward;
+    float gravity_right;
+    float gravity_normal;
+    float magnetic_norm_reference;
+    uint8_t magnetic_reference_samples;
+    bool magnetic_reference_ready;
+    uint8_t debug_log_count;
+
+    bool calibration_loaded;
+    bool calibrating;
+    uint32_t calibration_start_ms;
+    uint32_t calibration_message_until_ms;
+    uint32_t calibration_samples;
+    int16_t calibration_min_x;
+    int16_t calibration_min_y;
+    int16_t calibration_min_z;
+    int16_t calibration_max_x;
+    int16_t calibration_max_y;
+    int16_t calibration_max_z;
+
     /**
      * @brief QMC5883P 校准参数.
      */
     qmc5883p_calibration_t calibration;
 } watch_compass_ctx_t;
 
+typedef enum {
+    WATCH_COMPASS_ACCEL_READY = 0,
+    WATCH_COMPASS_ACCEL_UNAVAILABLE,
+    WATCH_COMPASS_ACCEL_MOVING,
+    WATCH_COMPASS_ACCEL_TOO_STEEP,
+} watch_compass_accel_state_t;
+
 /**
  * @brief 指南针页面静态上下文.
  */
 static watch_compass_ctx_t s_compass;
+static const char *TAG = "watch_compass";
 
 static const char *s_cardinal_text_en[WATCH_COMPASS_CARDINAL_COUNT] = {
     "N", "E", "S", "W"
@@ -320,6 +377,215 @@ static float watch_compass_smooth_heading(float heading_deg)
         180.0f / WATCH_COMPASS_PI);
 }
 
+static void watch_compass_reset_motion_filter(void)
+{
+    s_compass.accel_last_valid = false;
+    s_compass.accel_stable_samples = 0;
+    s_compass.gravity_filter_ready = false;
+}
+
+static void watch_compass_reset_magnetic_reference(void)
+{
+    s_compass.magnetic_norm_reference = 0.0f;
+    s_compass.magnetic_reference_samples = 0;
+    s_compass.magnetic_reference_ready = false;
+}
+
+static bool watch_compass_magnetic_field_valid(float x, float y, float z)
+{
+    float magnitude = sqrtf(x * x + y * y + z * z);
+
+    if(!isfinite(magnitude) || magnitude < 1.0f) {
+        return false;
+    }
+
+    if(!s_compass.magnetic_reference_ready) {
+        if(s_compass.magnetic_reference_samples == 0U) {
+            s_compass.magnetic_norm_reference = magnitude;
+        }
+        else {
+            s_compass.magnetic_norm_reference +=
+                (magnitude - s_compass.magnetic_norm_reference) /
+                (float)(s_compass.magnetic_reference_samples + 1U);
+        }
+        s_compass.magnetic_reference_samples++;
+        if(s_compass.magnetic_reference_samples >= WATCH_COMPASS_MAG_BASE_SAMPLES) {
+            s_compass.magnetic_reference_ready = true;
+        }
+        return true;
+    }
+
+    float ratio = magnitude / s_compass.magnetic_norm_reference;
+    if(ratio < WATCH_COMPASS_MAG_MIN_RATIO || ratio > WATCH_COMPASS_MAG_MAX_RATIO) {
+        return false;
+    }
+
+    s_compass.magnetic_norm_reference += WATCH_COMPASS_MAG_BASE_ALPHA *
+                                          (magnitude - s_compass.magnetic_norm_reference);
+    return true;
+}
+
+static watch_compass_accel_state_t watch_compass_read_gravity(float *forward,
+                                                               float *right,
+                                                               float *normal,
+                                                               float *tilt_deg)
+{
+    watch_bmi270_accel_sample_t sample;
+    float sample_forward;
+    float sample_right;
+    float sample_normal;
+    float magnitude;
+    float normal_ratio;
+    int frame_delta = 0;
+
+    if(forward == NULL || right == NULL || normal == NULL || tilt_deg == NULL) {
+        return WATCH_COMPASS_ACCEL_UNAVAILABLE;
+    }
+
+    if(watch_bmi270_read_acceleration(&sample) != ESP_OK || !sample.valid) {
+        watch_compass_reset_motion_filter();
+        return WATCH_COMPASS_ACCEL_UNAVAILABLE;
+    }
+
+    if(s_compass.accel_last_valid) {
+        frame_delta = abs((int)sample.x_mg - (int)s_compass.accel_last_x) +
+                      abs((int)sample.y_mg - (int)s_compass.accel_last_y) +
+                      abs((int)sample.z_mg - (int)s_compass.accel_last_z);
+    }
+    s_compass.accel_last_x = sample.x_mg;
+    s_compass.accel_last_y = sample.y_mg;
+    s_compass.accel_last_z = sample.z_mg;
+
+    sample_forward = WATCH_COMPASS_ACCEL_FORWARD(sample);
+    sample_right = WATCH_COMPASS_ACCEL_RIGHT(sample);
+    sample_normal = WATCH_COMPASS_ACCEL_NORMAL(sample);
+    magnitude = sqrtf(sample_forward * sample_forward +
+                      sample_right * sample_right +
+                      sample_normal * sample_normal);
+
+    if(!isfinite(magnitude) ||
+       magnitude < WATCH_COMPASS_GRAVITY_MIN_MG ||
+       magnitude > WATCH_COMPASS_GRAVITY_MAX_MG ||
+       (s_compass.accel_last_valid && frame_delta > WATCH_COMPASS_MOTION_DELTA_MG)) {
+        s_compass.accel_last_valid = true;
+        s_compass.accel_stable_samples = 0;
+        s_compass.gravity_filter_ready = false;
+        return WATCH_COMPASS_ACCEL_MOVING;
+    }
+
+    s_compass.accel_last_valid = true;
+    if(s_compass.accel_stable_samples < WATCH_COMPASS_STABLE_SAMPLES) {
+        s_compass.accel_stable_samples++;
+    }
+
+    if(!s_compass.gravity_filter_ready) {
+        s_compass.gravity_forward = sample_forward;
+        s_compass.gravity_right = sample_right;
+        s_compass.gravity_normal = sample_normal;
+        s_compass.gravity_filter_ready = true;
+    }
+    else {
+        s_compass.gravity_forward += WATCH_COMPASS_GRAVITY_ALPHA *
+                                     (sample_forward - s_compass.gravity_forward);
+        s_compass.gravity_right += WATCH_COMPASS_GRAVITY_ALPHA *
+                                   (sample_right - s_compass.gravity_right);
+        s_compass.gravity_normal += WATCH_COMPASS_GRAVITY_ALPHA *
+                                    (sample_normal - s_compass.gravity_normal);
+    }
+
+    *forward = s_compass.gravity_forward;
+    *right = s_compass.gravity_right;
+    *normal = s_compass.gravity_normal;
+    magnitude = sqrtf(*forward * *forward + *right * *right + *normal * *normal);
+    if(magnitude < 1.0f) {
+        return WATCH_COMPASS_ACCEL_MOVING;
+    }
+
+    normal_ratio = fabsf(*normal) / magnitude;
+    if(normal_ratio > 1.0f) {
+        normal_ratio = 1.0f;
+    }
+    *tilt_deg = acosf(normal_ratio) * 180.0f / WATCH_COMPASS_PI;
+
+    if(s_compass.accel_stable_samples < WATCH_COMPASS_STABLE_SAMPLES) {
+        return WATCH_COMPASS_ACCEL_MOVING;
+    }
+    if(*tilt_deg > WATCH_COMPASS_MAX_TILT_DEG) {
+        return WATCH_COMPASS_ACCEL_TOO_STEEP;
+    }
+
+    return WATCH_COMPASS_ACCEL_READY;
+}
+
+static void watch_compass_update_level_indicator(watch_compass_accel_state_t state,
+                                                  float forward,
+                                                  float right,
+                                                  float normal,
+                                                  float tilt_deg)
+{
+    float magnitude;
+    float offset_x;
+    float offset_y;
+    float offset_magnitude;
+    char text[32];
+    uint32_t color = 0xffb347;
+
+    if(s_compass.level_ring == NULL ||
+       s_compass.center_dot == NULL ||
+       s_compass.level_label == NULL) {
+        return;
+    }
+
+    if(state == WATCH_COMPASS_ACCEL_UNAVAILABLE) {
+        lv_obj_add_flag(s_compass.level_ring, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_compass.center_dot, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_compass.level_label, "2D ONLY | UP:CAL");
+        lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xffb347), 0);
+        return;
+    }
+
+    lv_obj_clear_flag(s_compass.level_ring, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_compass.center_dot, LV_OBJ_FLAG_HIDDEN);
+    magnitude = sqrtf(forward * forward + right * right + normal * normal);
+    if(magnitude < 1.0f) {
+        magnitude = 1.0f;
+    }
+
+    offset_x = right / magnitude * 26.0f;
+    offset_y = -forward / magnitude * 26.0f;
+    offset_magnitude = sqrtf(offset_x * offset_x + offset_y * offset_y);
+    if(offset_magnitude > WATCH_COMPASS_LEVEL_DOT_TRAVEL) {
+        float scale = WATCH_COMPASS_LEVEL_DOT_TRAVEL / offset_magnitude;
+        offset_x *= scale;
+        offset_y *= scale;
+    }
+    lv_obj_set_pos(s_compass.center_dot,
+                   WATCH_COMPASS_CENTER_X - 5 + watch_compass_round_coord(offset_x),
+                   WATCH_COMPASS_CENTER_Y - 5 + watch_compass_round_coord(offset_y));
+
+    if(state == WATCH_COMPASS_ACCEL_MOVING) {
+        snprintf(text, sizeof(text), "KEEP STILL | UP:CAL");
+        color = 0xff5b64;
+    }
+    else if(state == WATCH_COMPASS_ACCEL_TOO_STEEP) {
+        snprintf(text, sizeof(text), "LAY FLAT %d | UP:CAL", (int)(tilt_deg + 0.5f));
+        color = 0xffb347;
+    }
+    else if(tilt_deg <= WATCH_COMPASS_LEVEL_DEG) {
+        snprintf(text, sizeof(text), "LEVEL | UP:CAL");
+        color = 0x55e08a;
+    }
+    else {
+        snprintf(text, sizeof(text), "TILT %d | UP:CAL", (int)(tilt_deg + 0.5f));
+        color = 0x46c7e8;
+    }
+
+    lv_label_set_text(s_compass.level_label, text);
+    lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_color(s_compass.center_dot, lv_color_hex(color), 0);
+    lv_obj_set_style_border_color(s_compass.level_ring, lv_color_hex(color), 0);
+}
+
 /**
  * @brief 把“相对屏幕顶部顺时针”的角度转换成屏幕坐标.
  *
@@ -387,7 +653,6 @@ static void watch_compass_set_direction_visible(bool visible)
         s_compass.north_arrow_left,
         s_compass.north_arrow_right,
         s_compass.south_line,
-        s_compass.center_dot,
     };
 
     for(size_t i = 0; i < sizeof(objects) / sizeof(objects[0]); i++) {
@@ -676,6 +941,21 @@ static void watch_compass_create_dial(void)
 
     watch_compass_apply_language(true);
 
+    s_compass.level_ring = lv_obj_create(s_compass.page);
+    lv_obj_remove_style_all(s_compass.level_ring);
+    lv_obj_set_size(s_compass.level_ring,
+                    WATCH_COMPASS_LEVEL_RING_SIZE,
+                    WATCH_COMPASS_LEVEL_RING_SIZE);
+    lv_obj_set_pos(s_compass.level_ring,
+                   WATCH_COMPASS_CENTER_X - WATCH_COMPASS_LEVEL_RING_SIZE / 2,
+                   WATCH_COMPASS_CENTER_Y - WATCH_COMPASS_LEVEL_RING_SIZE / 2);
+    lv_obj_set_style_radius(s_compass.level_ring, WATCH_COMPASS_LEVEL_RING_SIZE / 2, 0);
+    lv_obj_set_style_bg_opa(s_compass.level_ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_compass.level_ring, 1, 0);
+    lv_obj_set_style_border_color(s_compass.level_ring, lv_color_hex(0x46c7e8), 0);
+    lv_obj_set_style_border_opa(s_compass.level_ring, LV_OPA_70, 0);
+    lv_obj_clear_flag(s_compass.level_ring, LV_OBJ_FLAG_CLICKABLE);
+
     watch_compass_create_direction_indicator();
 
     s_compass.center_dot = lv_obj_create(s_compass.page);
@@ -688,6 +968,128 @@ static void watch_compass_create_dial(void)
     lv_obj_clear_flag(s_compass.center_dot, LV_OBJ_FLAG_CLICKABLE);
 
     watch_compass_update_dial(0.0f);
+}
+
+static void watch_compass_start_calibration(void)
+{
+    s_compass.calibrating = true;
+    s_compass.calibration_start_ms = lv_tick_get();
+    s_compass.calibration_message_until_ms = 0;
+    s_compass.calibration_samples = 0;
+    s_compass.calibration_min_x = INT16_MAX;
+    s_compass.calibration_min_y = INT16_MAX;
+    s_compass.calibration_min_z = INT16_MAX;
+    s_compass.calibration_max_x = INT16_MIN;
+    s_compass.calibration_max_y = INT16_MIN;
+    s_compass.calibration_max_z = INT16_MIN;
+    s_compass.heading_filter_ready = false;
+    watch_compass_reset_motion_filter();
+    watch_compass_set_direction_visible(false);
+    watch_compass_show_text("CAL 00%");
+    if(s_compass.level_label != NULL) {
+        lv_label_set_text(s_compass.level_label, "TURN ALL AXES | DOWN:CANCEL");
+        lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xffd45a), 0);
+    }
+}
+
+static void watch_compass_cancel_calibration(void)
+{
+    s_compass.calibrating = false;
+    s_compass.calibration_message_until_ms = lv_tick_get() + 1200U;
+    watch_compass_show_text("CAL CANCEL");
+    if(s_compass.level_label != NULL) {
+        lv_label_set_text(s_compass.level_label, "PREVIOUS CAL KEPT");
+    }
+}
+
+static bool watch_compass_finish_calibration(void)
+{
+    int32_t span_x = (int32_t)s_compass.calibration_max_x - s_compass.calibration_min_x;
+    int32_t span_y = (int32_t)s_compass.calibration_max_y - s_compass.calibration_min_y;
+    int32_t span_z = (int32_t)s_compass.calibration_max_z - s_compass.calibration_min_z;
+    float radius_x;
+    float radius_y;
+    float radius_z;
+    float average_radius;
+    qmc5883p_calibration_t calibration = s_compass.calibration;
+
+    s_compass.calibrating = false;
+    s_compass.calibration_message_until_ms = lv_tick_get() + 1800U;
+
+    if(s_compass.calibration_samples < WATCH_COMPASS_CAL_MIN_SAMPLES ||
+       span_x < WATCH_COMPASS_CAL_MIN_SPAN ||
+       span_y < WATCH_COMPASS_CAL_MIN_SPAN ||
+       span_z < WATCH_COMPASS_CAL_MIN_SPAN) {
+        watch_compass_show_text("CAL FAILED");
+        if(s_compass.level_label != NULL) {
+            lv_label_set_text(s_compass.level_label, "ROTATE MORE NEXT TIME");
+            lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xff5b64), 0);
+        }
+        return false;
+    }
+
+    radius_x = (float)span_x * 0.5f;
+    radius_y = (float)span_y * 0.5f;
+    radius_z = (float)span_z * 0.5f;
+    average_radius = (radius_x + radius_y + radius_z) / 3.0f;
+    calibration.offset_x = (int16_t)(((int32_t)s_compass.calibration_max_x +
+                                      s_compass.calibration_min_x) / 2);
+    calibration.offset_y = (int16_t)(((int32_t)s_compass.calibration_max_y +
+                                      s_compass.calibration_min_y) / 2);
+    calibration.offset_z = (int16_t)(((int32_t)s_compass.calibration_max_z +
+                                      s_compass.calibration_min_z) / 2);
+    calibration.scale_x = average_radius / radius_x;
+    calibration.scale_y = average_radius / radius_y;
+    calibration.scale_z = average_radius / radius_z;
+
+    if(watch_compass_calibration_save(&calibration) != ESP_OK) {
+        watch_compass_show_text("SAVE ERROR");
+        if(s_compass.level_label != NULL) {
+            lv_label_set_text(s_compass.level_label, "PREVIOUS CAL KEPT");
+            lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xff5b64), 0);
+        }
+        return false;
+    }
+
+    s_compass.calibration = calibration;
+    s_compass.calibration_loaded = true;
+    s_compass.heading_filter_ready = false;
+    watch_compass_reset_magnetic_reference();
+    watch_compass_show_text("CAL SAVED");
+    if(s_compass.level_label != NULL) {
+        lv_label_set_text(s_compass.level_label, "KEEP STILL");
+        lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0x55e08a), 0);
+    }
+    return true;
+}
+
+static void watch_compass_collect_calibration(const qmc5883p_raw_t *raw)
+{
+    uint32_t elapsed_ms;
+    uint32_t percent;
+    char text[16];
+
+    if(raw == NULL || !s_compass.calibrating) {
+        return;
+    }
+
+    if(raw->x < s_compass.calibration_min_x) s_compass.calibration_min_x = raw->x;
+    if(raw->y < s_compass.calibration_min_y) s_compass.calibration_min_y = raw->y;
+    if(raw->z < s_compass.calibration_min_z) s_compass.calibration_min_z = raw->z;
+    if(raw->x > s_compass.calibration_max_x) s_compass.calibration_max_x = raw->x;
+    if(raw->y > s_compass.calibration_max_y) s_compass.calibration_max_y = raw->y;
+    if(raw->z > s_compass.calibration_max_z) s_compass.calibration_max_z = raw->z;
+    s_compass.calibration_samples++;
+
+    elapsed_ms = lv_tick_get() - s_compass.calibration_start_ms;
+    if(elapsed_ms >= WATCH_COMPASS_CAL_DURATION_MS) {
+        (void)watch_compass_finish_calibration();
+        return;
+    }
+
+    percent = elapsed_ms * 100U / WATCH_COMPASS_CAL_DURATION_MS;
+    snprintf(text, sizeof(text), "CAL %02lu%%", (unsigned long)percent);
+    watch_compass_show_text(text);
 }
 
 /**
@@ -704,6 +1106,9 @@ static void watch_compass_try_init_sensor(void)
     qmc5883p_result_t result = QMC5883P_OK;
 
     qmc5883p_calibration_default(&s_compass.calibration);
+    s_compass.calibration.declination_deg = WATCH_COMPASS_DECLINATION_DEG;
+    s_compass.calibration_loaded =
+        watch_compass_calibration_load(&s_compass.calibration) == ESP_OK;
     s_compass.calibration.declination_deg = WATCH_COMPASS_DECLINATION_DEG;
 
     qmc5883p_port_i2c_scan();
@@ -731,17 +1136,32 @@ static void watch_compass_update_heading(void)
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
-    float north_component = 0.0f;
-    float east_component = 0.0f;
+    float magnetic_forward = 0.0f;
+    float magnetic_right = 0.0f;
+    float magnetic_normal = 0.0f;
+    float gravity_forward = 0.0f;
+    float gravity_right = 0.0f;
+    float gravity_normal = 0.0f;
+    float tilt_deg = 0.0f;
     float heading_deg = 0.0f;
     char text[16] = {0};
     qmc5883p_result_t result = QMC5883P_OK;
+    watch_compass_accel_state_t accel_state;
+    uint32_t now_ms;
 
     if(s_compass.page == NULL || s_compass.heading_label == NULL) {
         return;
     }
 
     watch_compass_apply_language(false);
+
+    now_ms = lv_tick_get();
+    if(!s_compass.calibrating &&
+       s_compass.calibration_message_until_ms != 0U &&
+       (int32_t)(s_compass.calibration_message_until_ms - now_ms) > 0) {
+        return;
+    }
+    s_compass.calibration_message_until_ms = 0;
 
     if(!s_compass.sensor_ready) {
         watch_compass_try_init_sensor();
@@ -767,19 +1187,78 @@ static void watch_compass_update_heading(void)
         return;
     }
 
+    if(s_compass.calibrating) {
+        watch_compass_collect_calibration(&raw);
+        return;
+    }
+
     result = qmc5883p_apply_calibration(&raw, &s_compass.calibration, &x, &y, &z);
     if(result != QMC5883P_OK) {
         watch_compass_show_error("DATA ERR");
         return;
     }
 
-    (void)z;
+    magnetic_forward = WATCH_COMPASS_MAG_FORWARD(x, y, z);
+    magnetic_right = WATCH_COMPASS_MAG_RIGHT(x, y, z);
+    magnetic_normal = WATCH_COMPASS_MAG_NORMAL(x, y, z);
+    accel_state = watch_compass_read_gravity(&gravity_forward,
+                                              &gravity_right,
+                                              &gravity_normal,
+                                              &tilt_deg);
+    watch_compass_update_level_indicator(accel_state,
+                                          gravity_forward,
+                                          gravity_right,
+                                          gravity_normal,
+                                          tilt_deg);
 
-    north_component = WATCH_COMPASS_NORTH_COMPONENT(x, y);
-    east_component = WATCH_COMPASS_EAST_COMPONENT(x, y);
-    heading_deg = qmc5883p_calc_true_heading_deg(north_component,
-                                                 east_component,
-                                                 s_compass.calibration.declination_deg);
+    if(accel_state == WATCH_COMPASS_ACCEL_MOVING) {
+        watch_compass_show_error("MOVING");
+        return;
+    }
+    if(accel_state == WATCH_COMPASS_ACCEL_TOO_STEEP) {
+        watch_compass_show_error("TOO STEEP");
+        return;
+    }
+
+    if(s_compass.calibration_loaded &&
+       !watch_compass_magnetic_field_valid(magnetic_forward,
+                                            magnetic_right,
+                                            magnetic_normal)) {
+        watch_compass_show_error("MAG FIELD");
+        if(s_compass.level_label != NULL) {
+            lv_label_set_text(s_compass.level_label, "MOVE AWAY FROM METAL");
+            lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xff5b64), 0);
+        }
+        return;
+    }
+
+    if(accel_state == WATCH_COMPASS_ACCEL_READY && s_compass.calibration_loaded) {
+        result = qmc5883p_calc_tilt_compensated_heading_deg(
+            magnetic_forward,
+            magnetic_right,
+            magnetic_normal,
+            gravity_forward,
+            gravity_right,
+            gravity_normal,
+            s_compass.calibration.declination_deg,
+            &heading_deg);
+        if(result != QMC5883P_OK) {
+            watch_compass_show_error("MAG ANGLE");
+            return;
+        }
+    }
+    else {
+        /* 未校准或 BMI270 不可用时保留水平二维指南针，并在状态栏明确提示。 */
+        heading_deg = qmc5883p_calc_true_heading_deg(magnetic_forward,
+                                                     magnetic_right,
+                                                     s_compass.calibration.declination_deg);
+        if(accel_state == WATCH_COMPASS_ACCEL_READY && !s_compass.calibration_loaded &&
+           s_compass.level_label != NULL) {
+            lv_label_set_text(s_compass.level_label, "CAL FIRST | UP:CAL");
+            lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xffb347), 0);
+        }
+    }
+
     heading_deg = watch_compass_normalize_heading(
         heading_deg + WATCH_COMPASS_MOUNT_OFFSET_DEG);
     heading_deg = watch_compass_smooth_heading(heading_deg);
@@ -788,6 +1267,23 @@ static void watch_compass_update_heading(void)
     watch_compass_update_needle(heading_deg);
     watch_compass_format_heading(heading_deg, text, sizeof(text));
     watch_compass_show_text(text);
+
+    s_compass.debug_log_count++;
+    if(s_compass.debug_log_count >= 5U) {
+        s_compass.debug_log_count = 0;
+        ESP_LOGI(TAG,
+                 "mag_raw=%d/%d/%d acc_raw=%d/%d/%d tilt=%.1f state=%d cal=%d heading=%.1f",
+                 raw.x,
+                 raw.y,
+                 raw.z,
+                 s_compass.accel_last_x,
+                 s_compass.accel_last_y,
+                 s_compass.accel_last_z,
+                 (double)tilt_deg,
+                 (int)accel_state,
+                 s_compass.calibration_loaded ? 1 : 0,
+                 (double)heading_deg);
+    }
 }
 
 /**
@@ -837,6 +1333,15 @@ static void watch_compass_create_heading_label(void)
     lv_label_set_text(s_compass.heading_label, "--");
     lv_obj_align(s_compass.heading_label, LV_ALIGN_CENTER, 0, WATCH_COMPASS_HEADING_Y_OFFSET);
     lv_obj_clear_flag(s_compass.heading_label, LV_OBJ_FLAG_CLICKABLE);
+
+    s_compass.level_label = lv_label_create(s_compass.page);
+    lv_obj_set_width(s_compass.level_label, 190);
+    lv_obj_set_style_text_font(s_compass.level_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_compass.level_label, lv_color_hex(0xffb347), 0);
+    lv_obj_set_style_text_align(s_compass.level_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_compass.level_label, "KEEP STILL | UP:CAL");
+    lv_obj_align(s_compass.level_label, LV_ALIGN_CENTER, 0, 87);
+    lv_obj_clear_flag(s_compass.level_label, LV_OBJ_FLAG_CLICKABLE);
 }
 
 /**
@@ -880,6 +1385,8 @@ void watch_compass_reset(void)
 {
     s_compass.wants_back = false;
     s_compass.heading_filter_ready = false;
+    watch_compass_reset_motion_filter();
+    watch_compass_reset_magnetic_reference();
     watch_compass_apply_language(true);
 
     if(s_compass.heading_label != NULL) {
@@ -901,7 +1408,19 @@ void watch_compass_on_key(watch_key_t key)
         return;
     }
 
-    if(key == WATCH_KEY_2) {
+    if(key == WATCH_KEY_1 && !s_compass.calibrating) {
+        if(s_compass.sensor_ready) {
+            watch_compass_start_calibration();
+        }
+        else {
+            watch_compass_show_error("NO SENSOR");
+        }
+    }
+    else if(key == WATCH_KEY_3 && s_compass.calibrating) {
+        watch_compass_cancel_calibration();
+    }
+    else if(key == WATCH_KEY_2) {
+        s_compass.calibrating = false;
         s_compass.wants_back = true;
     }
 }
@@ -925,6 +1444,8 @@ bool watch_compass_wants_back(void)
  */
 void watch_compass_destroy(void)
 {
+    s_compass.calibrating = false;
+
     if(s_compass.timer != NULL) {
         lv_timer_del(s_compass.timer);
         s_compass.timer = NULL;

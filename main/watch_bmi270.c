@@ -23,9 +23,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -495,6 +497,23 @@ esp_err_t watch_bmi270_init(void)
 bool watch_bmi270_is_ready(void)
 {
     return s_bmi270_ready;
+}
+
+esp_err_t watch_bmi270_read_acceleration(watch_bmi270_accel_sample_t *sample)
+{
+    esp_err_t ret;
+
+    if(sample == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(sample, 0, sizeof(*sample));
+    ret = bmi270_read_accel_mg(&sample->x_mg,
+                               &sample->y_mg,
+                               &sample->z_mg);
+    sample->timestamp_us = esp_timer_get_time();
+    sample->valid = ret == ESP_OK;
+    return ret;
 }
 
 /**

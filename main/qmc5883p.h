@@ -55,7 +55,12 @@ typedef enum {
     /**
      * @brief 磁场数据溢出.
      */
-    QMC5883P_ERR_OVERFLOW = -5
+    QMC5883P_ERR_OVERFLOW = -5,
+
+    /**
+     * @brief 重力或水平磁场向量无效，无法计算可靠航向。
+     */
+    QMC5883P_ERR_INVALID_VECTOR = -6
 } qmc5883p_result_t;
 
 /**
@@ -229,6 +234,32 @@ qmc5883p_result_t qmc5883p_apply_calibration(const qmc5883p_raw_t *raw,
  * @return float 地理正北航向角, 范围为 0.0f 到 360.0f, 0 表示正北, 90 表示正东.
  */
 float qmc5883p_calc_true_heading_deg(float x_north_component, float y_east_component, float declination_deg);
+
+/**
+ * @brief 使用重力向量把三轴磁场投影到水平面，再计算航向。
+ *
+ * 磁场和重力必须处在同一个正交坐标系中。重力向量反向不会影响投影，
+ * 但各轴的交换和符号必须由板级代码先完成。
+ *
+ * @param mag_x 磁场前向/北向分量。
+ * @param mag_y 磁场右向/东向分量。
+ * @param mag_z 磁场法向分量。
+ * @param gravity_x 重力参考前向分量。
+ * @param gravity_y 重力参考右向分量。
+ * @param gravity_z 重力参考法向分量。
+ * @param declination_deg 地磁偏角，东偏为正。
+ * @param heading_deg 输出航向角，范围 [0, 360)。
+ * @return QMC5883P_OK 成功；QMC5883P_ERR_INVALID_VECTOR 表示姿态退化。
+ */
+qmc5883p_result_t qmc5883p_calc_tilt_compensated_heading_deg(
+    float mag_x,
+    float mag_y,
+    float mag_z,
+    float gravity_x,
+    float gravity_y,
+    float gravity_z,
+    float declination_deg,
+    float *heading_deg);
 
 /**
  * @brief 扫描 QMC5883P 所在 I2C 总线上的设备地址。

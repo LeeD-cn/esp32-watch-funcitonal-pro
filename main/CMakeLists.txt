@@ -21,6 +21,7 @@ idf_component_register(
         "watch_e_card.c"
         "watch_weather.c"
         "watch_compass.c"
+        "watch_compass_calibration.c"
         "qmc5883p_port.c"
         "qmc5883p.c"
         "time_sync.c"

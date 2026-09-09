@@ -398,3 +398,93 @@ float qmc5883p_calc_true_heading_deg(float x_north_component, float y_east_compo
 
     return heading_deg;
 }
+
+qmc5883p_result_t qmc5883p_calc_tilt_compensated_heading_deg(
+    float mag_x,
+    float mag_y,
+    float mag_z,
+    float gravity_x,
+    float gravity_y,
+    float gravity_z,
+    float declination_deg,
+    float *heading_deg)
+{
+    float gravity_norm;
+    float gravity_unit_x;
+    float gravity_unit_y;
+    float gravity_unit_z;
+    float forward_x;
+    float forward_y;
+    float forward_z;
+    float forward_norm;
+    float side_x;
+    float side_y;
+    float side_z;
+    float side_forward_dot;
+    float side_norm;
+    float north_component;
+    float east_component;
+
+    if(heading_deg == NULL) {
+        return QMC5883P_ERR_NULL;
+    }
+
+    gravity_norm = sqrtf(gravity_x * gravity_x +
+                         gravity_y * gravity_y +
+                         gravity_z * gravity_z);
+    if(!isfinite(gravity_norm) || gravity_norm < QMC5883P_HEADING_EPSILON) {
+        return QMC5883P_ERR_INVALID_VECTOR;
+    }
+
+    gravity_unit_x = gravity_x / gravity_norm;
+    gravity_unit_y = gravity_y / gravity_norm;
+    gravity_unit_z = gravity_z / gravity_norm;
+
+    /* 将设备前向轴投影到水平面，得到“水平化后的手表顶部方向”。 */
+    forward_x = 1.0f - gravity_unit_x * gravity_unit_x;
+    forward_y = -gravity_unit_x * gravity_unit_y;
+    forward_z = -gravity_unit_x * gravity_unit_z;
+    forward_norm = sqrtf(forward_x * forward_x +
+                         forward_y * forward_y +
+                         forward_z * forward_z);
+    if(!isfinite(forward_norm) || forward_norm < QMC5883P_HEADING_EPSILON) {
+        return QMC5883P_ERR_INVALID_VECTOR;
+    }
+    forward_x /= forward_norm;
+    forward_y /= forward_norm;
+    forward_z /= forward_norm;
+
+    /*
+     * 同样水平化第二轴，再对前向轴做正交化。这样不依赖板级映射
+     * 是右手系还是镜像坐标，并保证水平放置时结果退化为原 XY 算法。
+     */
+    side_x = -gravity_unit_y * gravity_unit_x;
+    side_y = 1.0f - gravity_unit_y * gravity_unit_y;
+    side_z = -gravity_unit_y * gravity_unit_z;
+    side_forward_dot = side_x * forward_x +
+                       side_y * forward_y +
+                       side_z * forward_z;
+    side_x -= side_forward_dot * forward_x;
+    side_y -= side_forward_dot * forward_y;
+    side_z -= side_forward_dot * forward_z;
+    side_norm = sqrtf(side_x * side_x + side_y * side_y + side_z * side_z);
+    if(!isfinite(side_norm) || side_norm < QMC5883P_HEADING_EPSILON) {
+        return QMC5883P_ERR_INVALID_VECTOR;
+    }
+    side_x /= side_norm;
+    side_y /= side_norm;
+    side_z /= side_norm;
+
+    north_component = mag_x * forward_x + mag_y * forward_y + mag_z * forward_z;
+    east_component = mag_x * side_x + mag_y * side_y + mag_z * side_z;
+    if(!isfinite(north_component) || !isfinite(east_component) ||
+       (fabsf(north_component) < QMC5883P_HEADING_EPSILON &&
+        fabsf(east_component) < QMC5883P_HEADING_EPSILON)) {
+        return QMC5883P_ERR_INVALID_VECTOR;
+    }
+
+    *heading_deg = qmc5883p_calc_true_heading_deg(north_component,
+                                                   east_component,
+                                                   declination_deg);
+    return QMC5883P_OK;
+}
