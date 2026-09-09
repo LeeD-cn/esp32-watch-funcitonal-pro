@@ -98,15 +98,15 @@ LV_FONT_DECLARE(cn_font_26);
 #define WATCH_COMPASS_MAG_BASE_ALPHA    0.05f
 
 /*
- * 板级坐标定义为：屏幕顶部、屏幕右侧、屏幕朝外法向。
- * 2026-09-09 真机五姿态日志确认 BMI270 为 Y/X/Z 对应上述三个方向；
- * QMC5883P 映射继续沿用原二维指南针已经验证过的航向方向。
+ * 2026-09-09 真机日志确认 BMI270 原始 Y/X/Z 分别朝屏幕顶部、右侧、外侧。
+ * 倾斜补偿的第二轴需与 QMC5883P 原二维航向的正方向一致，因此使用 -X；
+ * 水平气泡显示时再恢复为屏幕左右方向。
  */
 #define WATCH_COMPASS_MAG_FORWARD(x, y, z)       (x)
 #define WATCH_COMPASS_MAG_RIGHT(x, y, z)         (-(y))
 #define WATCH_COMPASS_MAG_NORMAL(x, y, z)        (-(z))
 #define WATCH_COMPASS_ACCEL_FORWARD(sample)      ((float)(sample).y_mg)
-#define WATCH_COMPASS_ACCEL_RIGHT(sample)        ((float)(sample).x_mg)
+#define WATCH_COMPASS_ACCEL_RIGHT(sample)        (-(float)(sample).x_mg)
 #define WATCH_COMPASS_ACCEL_NORMAL(sample)       ((float)(sample).z_mg)
 
 /**
@@ -551,7 +551,8 @@ static void watch_compass_update_level_indicator(watch_compass_accel_state_t sta
         magnitude = 1.0f;
     }
 
-    offset_x = right / magnitude * 26.0f;
+    /* 补偿坐标的第二轴与屏幕右向相反；气泡显示恢复为屏幕坐标。 */
+    offset_x = -right / magnitude * 26.0f;
     offset_y = -forward / magnitude * 26.0f;
     offset_magnitude = sqrtf(offset_x * offset_x + offset_y * offset_y);
     if(offset_magnitude > WATCH_COMPASS_LEVEL_DOT_TRAVEL) {
