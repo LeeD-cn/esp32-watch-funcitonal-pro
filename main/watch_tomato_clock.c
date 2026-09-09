@@ -19,11 +19,13 @@
 
 #include "watch_tomato_clock.h"
 #include "watch_language.h"
+#include "watch_tomato_presets.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 
 LV_FONT_DECLARE(cn_font_26);
+LV_FONT_DECLARE(tomato_preset_font_20);
 
 /* 以下宏大多是 UI 坐标、尺寸或任务参数。
  * 修改这类值时建议同时检查：
@@ -73,6 +75,11 @@ LV_FONT_DECLARE(cn_font_26);
 #define TOMATO_TIMER_PERIOD_MS          1000
 #define TOMATO_BLINK_HALF_PERIOD_MS     500
 
+#define TOMATO_PRESET_LINE_COUNT        5
+#define TOMATO_PRESET_TITLE_Y           10
+#define TOMATO_PRESET_LINE_Y            48
+#define TOMATO_PRESET_LINE_STEP         36
+
 /**
  * @brief 番茄钟页面焦点枚举。
  *
@@ -82,6 +89,7 @@ LV_FONT_DECLARE(cn_font_26);
 typedef enum {
     TOMATO_FOCUS_BACK = 0,
     TOMATO_FOCUS_TIME_SET,
+    TOMATO_FOCUS_PRESETS,
     TOMATO_FOCUS_DIRECTION,
     TOMATO_FOCUS_PLAY_PAUSE,
     TOMATO_FOCUS_RESET,
@@ -89,6 +97,15 @@ typedef enum {
     TOMATO_FOCUS_MM,
     TOMATO_FOCUS_SS,
 } tomato_focus_t;
+
+typedef enum {
+    TOMATO_PRESET_VIEW_CLOSED = 0,
+    TOMATO_PRESET_VIEW_LIST,
+    TOMATO_PRESET_VIEW_ACTION,
+    TOMATO_PRESET_VIEW_EDIT,
+    TOMATO_PRESET_VIEW_DELETE_CONFIRM,
+    TOMATO_PRESET_VIEW_NOTICE,
+} tomato_preset_view_t;
 
 /**
  * @brief 番茄钟页面上下文。
@@ -102,6 +119,7 @@ typedef struct {
 
     lv_obj_t *time_set_bg;
     lv_obj_t *time_set_label;
+    lv_obj_t *presets_label;
 
     lv_obj_t *direction_label;
     lv_obj_t *play_label;
@@ -128,6 +146,11 @@ typedef struct {
     lv_obj_t *cursor;
     lv_timer_t *timer;
 
+    lv_obj_t *preset_panel;
+    lv_obj_t *preset_title;
+    lv_obj_t *preset_lines[TOMATO_PRESET_LINE_COUNT];
+    lv_obj_t *preset_cursor;
+
     tomato_focus_t focus;
     tomato_focus_t edit_focus;
 
@@ -153,6 +176,17 @@ typedef struct {
 
     int timer_set_total;
     int timer_current;
+
+    tomato_preset_view_t preset_view;
+    tomato_preset_view_t preset_notice_return_view;
+    int preset_focus;
+    int preset_selected_slot;
+    bool preset_field_edit;
+    bool preset_is_new;
+    int preset_hour;
+    int preset_min;
+    int preset_sec;
+    watch_tomato_preset_t presets[WATCH_TOMATO_PRESET_COUNT];
 } tomato_clock_ctx_t;
 
 /* 单例页面状态：该页面同一时间只会存在一个实例。 */
@@ -201,6 +235,9 @@ static lv_obj_t *tomato_obj_from_focus(tomato_focus_t focus)
 
     case TOMATO_FOCUS_TIME_SET:
         return s_tomato.time_set_label;
+
+    case TOMATO_FOCUS_PRESETS:
+        return s_tomato.presets_label;
 
     case TOMATO_FOCUS_DIRECTION:
         return s_tomato.direction_label;
@@ -303,6 +340,14 @@ static void tomato_label_style_26(lv_obj_t *label)
     /* 统一番茄钟页面 26 号文本样式。
      */
     lv_obj_set_style_text_font(label, &lv_font_montserrat_26, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static void tomato_label_style_20(lv_obj_t *label)
+{
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
@@ -438,14 +483,23 @@ static void tomato_apply_language(bool force)
 
     if(s_tomato.time_set_label != NULL) {
         lv_obj_set_style_text_font(s_tomato.time_set_label,
-                                   chinese ? &cn_font_26 : &lv_font_montserrat_26,
+                                   chinese ? &tomato_preset_font_20 : &lv_font_montserrat_20,
                                    0);
         lv_label_set_text(s_tomato.time_set_label,
-                          chinese ? "时间设置" : "TimeSet");
-        lv_obj_align(s_tomato.time_set_label,
-                     LV_ALIGN_TOP_MID,
-                     0,
-                     TOMATO_TOP_Y);
+                          chinese ? "时间设置" : "Time Set");
+        lv_obj_set_pos(s_tomato.time_set_label, 48, TOMATO_TOP_Y + 2);
+    }
+
+    if(s_tomato.presets_label != NULL) {
+        lv_obj_set_style_text_font(s_tomato.presets_label,
+                                   chinese ? &tomato_preset_font_20 : &lv_font_montserrat_20,
+                                   0);
+        lv_label_set_text(s_tomato.presets_label,
+                          chinese ? "保存的时钟" : "Saved");
+        lv_obj_align(s_tomato.presets_label,
+                     LV_ALIGN_TOP_RIGHT,
+                     -10,
+                     TOMATO_TOP_Y + 2);
     }
 
     if(s_tomato.reset_label != NULL) {
@@ -780,6 +834,417 @@ static void tomato_direction_toggle(void)
     }
 }
 
+static const lv_font_t *tomato_preset_font(void)
+{
+    return s_tomato.language_chinese
+               ? &tomato_preset_font_20
+               : &lv_font_montserrat_20;
+}
+
+static void tomato_preset_format_time(uint32_t seconds, char *out, size_t out_size)
+{
+    unsigned hour = seconds / 3600U;
+    unsigned min = (seconds % 3600U) / 60U;
+    unsigned sec = seconds % 60U;
+
+    snprintf(out, out_size, "%02u:%02u:%02u", hour, min, sec);
+}
+
+static void tomato_preset_hide_all_lines(void)
+{
+    for(int i = 0; i < TOMATO_PRESET_LINE_COUNT; ++i) {
+        lv_obj_add_flag(s_tomato.preset_lines[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void tomato_preset_set_line(int index, const char *text)
+{
+    if(index < 0 || index >= TOMATO_PRESET_LINE_COUNT) {
+        return;
+    }
+
+    lv_obj_set_style_text_font(s_tomato.preset_lines[index],
+                               tomato_preset_font(), 0);
+    lv_label_set_text(s_tomato.preset_lines[index], text);
+    lv_obj_align(s_tomato.preset_lines[index], LV_ALIGN_TOP_MID, 0,
+                 TOMATO_PRESET_LINE_Y + index * TOMATO_PRESET_LINE_STEP);
+    lv_obj_clear_flag(s_tomato.preset_lines[index], LV_OBJ_FLAG_HIDDEN);
+}
+
+static void tomato_preset_cursor_update(void)
+{
+    if(s_tomato.preset_cursor == NULL ||
+       s_tomato.preset_focus < 0 ||
+       s_tomato.preset_focus >= TOMATO_PRESET_LINE_COUNT) {
+        return;
+    }
+
+    lv_obj_t *target = s_tomato.preset_lines[s_tomato.preset_focus];
+    if(lv_obj_has_flag(target, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(s_tomato.preset_cursor, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_update_layout(s_tomato.preset_panel);
+    lv_obj_set_pos(s_tomato.preset_cursor,
+                   lv_obj_get_x(target) - TOMATO_SELECTOR_PAD_X,
+                   lv_obj_get_y(target) - TOMATO_SELECTOR_PAD_Y);
+    lv_obj_set_size(s_tomato.preset_cursor,
+                    lv_obj_get_width(target) + TOMATO_SELECTOR_PAD_X * 2,
+                    lv_obj_get_height(target) + TOMATO_SELECTOR_PAD_Y * 2);
+    lv_obj_clear_flag(s_tomato.preset_cursor, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_tomato.preset_cursor);
+}
+
+static void tomato_preset_set_title(const char *text)
+{
+    lv_obj_set_style_text_font(s_tomato.preset_title, tomato_preset_font(), 0);
+    lv_label_set_text(s_tomato.preset_title, text);
+    lv_obj_align(s_tomato.preset_title, LV_ALIGN_TOP_MID, 0,
+                 TOMATO_PRESET_TITLE_Y);
+}
+
+static void tomato_preset_render_list(void)
+{
+    char line[32];
+    char time_text[16];
+
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_LIST;
+    s_tomato.preset_field_edit = false;
+    if(s_tomato.preset_focus < 0 || s_tomato.preset_focus > 3) {
+        s_tomato.preset_focus = 0;
+    }
+
+    tomato_preset_set_title(s_tomato.language_chinese ? "保存的时钟" : "Saved Timers");
+    tomato_preset_hide_all_lines();
+    tomato_preset_set_line(0, s_tomato.language_chinese ? "< 返回" : "< Back");
+
+    for(int i = 0; i < WATCH_TOMATO_PRESET_COUNT; ++i) {
+        if(s_tomato.presets[i].valid) {
+            tomato_preset_format_time(s_tomato.presets[i].seconds,
+                                      time_text, sizeof(time_text));
+            snprintf(line, sizeof(line), "%d  %s", i + 1, time_text);
+        } else {
+            snprintf(line, sizeof(line), s_tomato.language_chinese
+                     ? "%d  空槽 (新增)" : "%d  Empty (Add)", i + 1);
+        }
+        tomato_preset_set_line(i + 1, line);
+    }
+
+    tomato_preset_cursor_update();
+}
+
+static void tomato_preset_render_action(void)
+{
+    char title[40];
+    char time_text[16];
+    int slot = s_tomato.preset_selected_slot;
+
+    tomato_preset_format_time(s_tomato.presets[slot].seconds,
+                              time_text, sizeof(time_text));
+    snprintf(title, sizeof(title), s_tomato.language_chinese
+             ? "时钟 %d  %s" : "Timer %d  %s", slot + 1, time_text);
+
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_ACTION;
+    s_tomato.preset_focus = 0;
+    s_tomato.preset_field_edit = false;
+    tomato_preset_set_title(title);
+    tomato_preset_hide_all_lines();
+    tomato_preset_set_line(0, s_tomato.language_chinese ? "启动" : "Start");
+    tomato_preset_set_line(1, s_tomato.language_chinese ? "修改" : "Edit");
+    tomato_preset_set_line(2, s_tomato.language_chinese ? "删除" : "Delete");
+    tomato_preset_set_line(3, s_tomato.language_chinese ? "返回" : "Back");
+    tomato_preset_cursor_update();
+}
+
+static void tomato_preset_render_edit(void)
+{
+    char title[24];
+    char line[24];
+
+    snprintf(title, sizeof(title), s_tomato.language_chinese
+             ? "%s时钟 %d" : "%s Timer %d",
+             s_tomato.preset_is_new
+                 ? (s_tomato.language_chinese ? "新增" : "New")
+                 : (s_tomato.language_chinese ? "修改" : "Edit"),
+             s_tomato.preset_selected_slot + 1);
+
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_EDIT;
+    tomato_preset_set_title(title);
+    tomato_preset_hide_all_lines();
+    tomato_preset_set_line(0, s_tomato.language_chinese ? "< 返回" : "< Back");
+
+    snprintf(line, sizeof(line), s_tomato.language_chinese
+             ? "小时  %s%02d%s" : "Hour  %s%02d%s",
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 1 ? "[" : "",
+             s_tomato.preset_hour,
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 1 ? "]" : "");
+    tomato_preset_set_line(1, line);
+    snprintf(line, sizeof(line), s_tomato.language_chinese
+             ? "分  %s%02d%s" : "Min  %s%02d%s",
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 2 ? "[" : "",
+             s_tomato.preset_min,
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 2 ? "]" : "");
+    tomato_preset_set_line(2, line);
+    snprintf(line, sizeof(line), s_tomato.language_chinese
+             ? "秒  %s%02d%s" : "Sec  %s%02d%s",
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 3 ? "[" : "",
+             s_tomato.preset_sec,
+             s_tomato.preset_field_edit && s_tomato.preset_focus == 3 ? "]" : "");
+    tomato_preset_set_line(3, line);
+    tomato_preset_set_line(4, s_tomato.language_chinese ? "保存" : "Save");
+    tomato_preset_cursor_update();
+}
+
+static void tomato_preset_render_delete_confirm(void)
+{
+    char title[24];
+
+    snprintf(title, sizeof(title), s_tomato.language_chinese
+             ? "删除时钟 %d?" : "Delete Timer %d?",
+             s_tomato.preset_selected_slot + 1);
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_DELETE_CONFIRM;
+    s_tomato.preset_focus = 0; /* 删除等破坏性操作默认选中取消。 */
+    tomato_preset_set_title(title);
+    tomato_preset_hide_all_lines();
+    tomato_preset_set_line(0, s_tomato.language_chinese ? "取消" : "Cancel");
+    tomato_preset_set_line(1, s_tomato.language_chinese ? "删除" : "Delete");
+    tomato_preset_cursor_update();
+}
+
+static void tomato_preset_show_notice(const char *chinese,
+                                      const char *english,
+                                      tomato_preset_view_t return_view)
+{
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_NOTICE;
+    s_tomato.preset_notice_return_view = return_view;
+    s_tomato.preset_focus = 0;
+    tomato_preset_set_title(s_tomato.language_chinese ? chinese : english);
+    tomato_preset_hide_all_lines();
+    tomato_preset_set_line(0, s_tomato.language_chinese ? "确定" : "OK");
+    tomato_preset_cursor_update();
+}
+
+static void tomato_preset_close(void)
+{
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_CLOSED;
+    s_tomato.preset_field_edit = false;
+    lv_obj_add_flag(s_tomato.preset_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_tomato.cursor, LV_OBJ_FLAG_HIDDEN);
+    tomato_cursor_update(false);
+}
+
+static void tomato_preset_open(void)
+{
+    esp_err_t ret = watch_tomato_presets_load(s_tomato.presets);
+
+    s_tomato.preset_focus = 0;
+    lv_obj_add_flag(s_tomato.cursor, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_tomato.preset_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_tomato.preset_panel);
+    tomato_preset_render_list();
+
+    if(ret != ESP_OK) {
+        tomato_preset_show_notice("读取失败", "Read failed",
+                                  TOMATO_PRESET_VIEW_LIST);
+    }
+}
+
+static void tomato_preset_begin_edit(bool is_new)
+{
+    int slot = s_tomato.preset_selected_slot;
+    uint32_t seconds = is_new ? 0 : s_tomato.presets[slot].seconds;
+
+    s_tomato.preset_is_new = is_new;
+    s_tomato.preset_hour = (int)(seconds / 3600U);
+    s_tomato.preset_min = (int)((seconds % 3600U) / 60U);
+    s_tomato.preset_sec = (int)(seconds % 60U);
+    s_tomato.preset_focus = 1;
+    s_tomato.preset_field_edit = false;
+    tomato_preset_render_edit();
+}
+
+static void tomato_preset_start_selected(void)
+{
+    uint32_t seconds = s_tomato.presets[s_tomato.preset_selected_slot].seconds;
+
+    if(s_tomato.timer_active) {
+        tomato_preset_show_notice("请先清零", "Reset timer first",
+                                  TOMATO_PRESET_VIEW_ACTION);
+        return;
+    }
+
+    tomato_stop_finish_blink();
+    s_tomato.count_up_mode = false;
+    tomato_total_seconds_to_hms((int)seconds,
+                                &s_tomato.hour,
+                                &s_tomato.min,
+                                &s_tomato.sec);
+    s_tomato.timer_set_total = (int)seconds;
+    s_tomato.timer_current = (int)seconds;
+    s_tomato.timer_active = true;
+    s_tomato.timer_running = true;
+    s_tomato.timer_finished = false;
+    s_tomato.focus = TOMATO_FOCUS_PLAY_PAUSE;
+    tomato_direction_label_update();
+    tomato_play_label_update();
+    tomato_countdown_display_total(s_tomato.timer_current);
+
+    if(s_tomato.timer) {
+        lv_timer_reset(s_tomato.timer);
+        lv_timer_resume(s_tomato.timer);
+    }
+
+    tomato_preset_close();
+}
+
+static int tomato_preset_focus_count(void)
+{
+    switch(s_tomato.preset_view) {
+    case TOMATO_PRESET_VIEW_LIST:
+    case TOMATO_PRESET_VIEW_ACTION:
+        return 4;
+    case TOMATO_PRESET_VIEW_EDIT:
+        return 5;
+    case TOMATO_PRESET_VIEW_DELETE_CONFIRM:
+        return 2;
+    case TOMATO_PRESET_VIEW_NOTICE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void tomato_preset_return_from_notice(void)
+{
+    if(s_tomato.preset_notice_return_view == TOMATO_PRESET_VIEW_ACTION) {
+        tomato_preset_render_action();
+    } else if(s_tomato.preset_notice_return_view == TOMATO_PRESET_VIEW_EDIT) {
+        tomato_preset_render_edit();
+    } else {
+        s_tomato.preset_focus = 0;
+        tomato_preset_render_list();
+    }
+}
+
+static void tomato_preset_on_key(watch_key_t key)
+{
+    if(key == WATCH_KEY_2_RELEASE) {
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_EDIT &&
+       s_tomato.preset_field_edit) {
+        int *value = s_tomato.preset_focus == 1 ? &s_tomato.preset_hour
+                     : s_tomato.preset_focus == 2 ? &s_tomato.preset_min
+                                                   : &s_tomato.preset_sec;
+        int max = s_tomato.preset_focus == 1 ? 99 : 59;
+
+        if(key == WATCH_KEY_1) {
+            *value = *value <= 0 ? max : *value - 1;
+            tomato_preset_render_edit();
+        } else if(key == WATCH_KEY_3) {
+            *value = *value >= max ? 0 : *value + 1;
+            tomato_preset_render_edit();
+        } else if(key == WATCH_KEY_2) {
+            s_tomato.preset_field_edit = false;
+            tomato_preset_render_edit();
+        }
+        return;
+    }
+
+    if(key == WATCH_KEY_1 || key == WATCH_KEY_3) {
+        int count = tomato_preset_focus_count();
+        int delta = key == WATCH_KEY_1 ? -1 : 1;
+        if(count > 0) {
+            s_tomato.preset_focus =
+                (s_tomato.preset_focus + delta + count) % count;
+            tomato_preset_cursor_update();
+        }
+        return;
+    }
+
+    if(key != WATCH_KEY_2) {
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_NOTICE) {
+        tomato_preset_return_from_notice();
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_LIST) {
+        if(s_tomato.preset_focus == 0) {
+            tomato_preset_close();
+            return;
+        }
+
+        s_tomato.preset_selected_slot = s_tomato.preset_focus - 1;
+        if(s_tomato.presets[s_tomato.preset_selected_slot].valid) {
+            tomato_preset_render_action();
+        } else {
+            tomato_preset_begin_edit(true);
+        }
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_ACTION) {
+        if(s_tomato.preset_focus == 0) {
+            tomato_preset_start_selected();
+        } else if(s_tomato.preset_focus == 1) {
+            tomato_preset_begin_edit(false);
+        } else if(s_tomato.preset_focus == 2) {
+            tomato_preset_render_delete_confirm();
+        } else {
+            s_tomato.preset_focus = s_tomato.preset_selected_slot + 1;
+            tomato_preset_render_list();
+        }
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_EDIT) {
+        if(s_tomato.preset_focus == 0) {
+            s_tomato.preset_focus = s_tomato.preset_selected_slot + 1;
+            tomato_preset_render_list();
+        } else if(s_tomato.preset_focus >= 1 && s_tomato.preset_focus <= 3) {
+            s_tomato.preset_field_edit = true;
+            tomato_preset_render_edit();
+        } else {
+            uint32_t seconds = (uint32_t)tomato_time_to_total_seconds(
+                s_tomato.preset_hour, s_tomato.preset_min, s_tomato.preset_sec);
+            if(seconds == 0) {
+                tomato_preset_show_notice("时间不能为零", "Time cannot be zero",
+                                          TOMATO_PRESET_VIEW_EDIT);
+            } else if(watch_tomato_preset_save(
+                          (size_t)s_tomato.preset_selected_slot, seconds) != ESP_OK) {
+                tomato_preset_show_notice("写入失败", "Save failed",
+                                          TOMATO_PRESET_VIEW_EDIT);
+            } else {
+                s_tomato.presets[s_tomato.preset_selected_slot].valid = true;
+                s_tomato.presets[s_tomato.preset_selected_slot].seconds = seconds;
+                s_tomato.preset_focus = s_tomato.preset_selected_slot + 1;
+                tomato_preset_render_list();
+            }
+        }
+        return;
+    }
+
+    if(s_tomato.preset_view == TOMATO_PRESET_VIEW_DELETE_CONFIRM) {
+        if(s_tomato.preset_focus == 0) {
+            tomato_preset_render_action();
+        } else if(watch_tomato_preset_delete(
+                      (size_t)s_tomato.preset_selected_slot) != ESP_OK) {
+            tomato_preset_show_notice("写入失败", "Delete failed",
+                                      TOMATO_PRESET_VIEW_ACTION);
+        } else {
+            s_tomato.presets[s_tomato.preset_selected_slot].valid = false;
+            s_tomato.presets[s_tomato.preset_selected_slot].seconds = 0;
+            s_tomato.preset_focus = s_tomato.preset_selected_slot + 1;
+            tomato_preset_render_list();
+        }
+    }
+}
+
 static void tomato_field_bg_update(void)
 {
     /* 编辑 HH/MM/SS 时移动字段背景，突出当前正在修改的字段。
@@ -1106,9 +1571,15 @@ lv_obj_t *watch_tomato_clock_create(lv_obj_t *parent)
     lv_obj_add_flag(s_tomato.time_set_bg, LV_OBJ_FLAG_HIDDEN);
 
     s_tomato.time_set_label = lv_label_create(s_tomato.page);
-    tomato_label_style_26(s_tomato.time_set_label);
-    lv_label_set_text(s_tomato.time_set_label, "TimeSet");
-    lv_obj_align(s_tomato.time_set_label, LV_ALIGN_TOP_MID, 0, TOMATO_TOP_Y);
+    tomato_label_style_20(s_tomato.time_set_label);
+    lv_label_set_text(s_tomato.time_set_label, "Time Set");
+    lv_obj_set_pos(s_tomato.time_set_label, 48, TOMATO_TOP_Y + 2);
+
+    s_tomato.presets_label = lv_label_create(s_tomato.page);
+    tomato_label_style_20(s_tomato.presets_label);
+    lv_label_set_text(s_tomato.presets_label, "Saved");
+    lv_obj_align(s_tomato.presets_label, LV_ALIGN_TOP_RIGHT, -10,
+                 TOMATO_TOP_Y + 2);
 
     s_tomato.direction_label = lv_label_create(s_tomato.page);
     tomato_label_style_26(s_tomato.direction_label);
@@ -1256,6 +1727,40 @@ lv_obj_t *watch_tomato_clock_create(lv_obj_t *parent)
     lv_obj_clear_flag(s_tomato.cursor, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_tomato.cursor, LV_OBJ_FLAG_CLICKABLE);
 
+    s_tomato.preset_panel = lv_obj_create(s_tomato.page);
+    lv_obj_remove_style_all(s_tomato.preset_panel);
+    lv_obj_set_size(s_tomato.preset_panel, WATCH_SCREEN_W, WATCH_SCREEN_H);
+    lv_obj_set_pos(s_tomato.preset_panel, 0, 0);
+    lv_obj_set_style_bg_color(s_tomato.preset_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_tomato.preset_panel, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_tomato.preset_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_tomato.preset_panel, LV_OBJ_FLAG_CLICKABLE);
+
+    s_tomato.preset_title = lv_label_create(s_tomato.preset_panel);
+    tomato_label_style_20(s_tomato.preset_title);
+    lv_obj_align(s_tomato.preset_title, LV_ALIGN_TOP_MID, 0,
+                 TOMATO_PRESET_TITLE_Y);
+
+    for(int i = 0; i < TOMATO_PRESET_LINE_COUNT; ++i) {
+        s_tomato.preset_lines[i] = lv_label_create(s_tomato.preset_panel);
+        tomato_label_style_20(s_tomato.preset_lines[i]);
+        lv_obj_align(s_tomato.preset_lines[i], LV_ALIGN_TOP_MID, 0,
+                     TOMATO_PRESET_LINE_Y + i * TOMATO_PRESET_LINE_STEP);
+    }
+
+    s_tomato.preset_cursor = lv_obj_create(s_tomato.preset_panel);
+    lv_obj_remove_style_all(s_tomato.preset_cursor);
+    lv_obj_set_style_bg_opa(s_tomato.preset_cursor, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(s_tomato.preset_cursor, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(s_tomato.preset_cursor, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_tomato.preset_cursor,
+                                  TOMATO_SELECTOR_BORDER_W, 0);
+    lv_obj_set_style_radius(s_tomato.preset_cursor,
+                            TOMATO_SELECTOR_RADIUS, 0);
+    lv_obj_clear_flag(s_tomato.preset_cursor, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_tomato.preset_cursor, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_tomato.preset_panel, LV_OBJ_FLAG_HIDDEN);
+
     s_tomato.timer = lv_timer_create(tomato_timer_cb, TOMATO_TIMER_PERIOD_MS, NULL);
     lv_timer_pause(s_tomato.timer);
 
@@ -1278,6 +1783,10 @@ lv_obj_t *watch_tomato_clock_create(lv_obj_t *parent)
     s_tomato.edit_temp = 0;
     s_tomato.timer_set_total = 0;
     s_tomato.timer_current = 0;
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_CLOSED;
+    s_tomato.preset_field_edit = false;
+    s_tomato.preset_focus = 0;
+    s_tomato.preset_selected_slot = 0;
 
     tomato_countdown_set_time(0, 0, 0);
     tomato_apply_language(true);
@@ -1319,6 +1828,9 @@ void watch_tomato_clock_reset(void)
     s_tomato.edit_temp = 0;
     s_tomato.timer_set_total = 0;
     s_tomato.timer_current = 0;
+    s_tomato.preset_view = TOMATO_PRESET_VIEW_CLOSED;
+    s_tomato.preset_field_edit = false;
+    s_tomato.preset_focus = 0;
 
     if(s_tomato.timer) {
         lv_timer_pause(s_tomato.timer);
@@ -1331,6 +1843,7 @@ void watch_tomato_clock_reset(void)
     tomato_apply_language(true);
     tomato_field_bg_update();
     tomato_wheel_hide();
+    lv_obj_add_flag(s_tomato.preset_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_tomato.cursor, LV_OBJ_FLAG_HIDDEN);
     tomato_cursor_update(false);
 }
@@ -1382,6 +1895,11 @@ void watch_tomato_clock_on_key(watch_key_t key)
     }
 
     tomato_apply_language(false);
+
+    if(s_tomato.preset_view != TOMATO_PRESET_VIEW_CLOSED) {
+        tomato_preset_on_key(key);
+        return;
+    }
 
     if(key == WATCH_KEY_2_RELEASE) {
         if(s_tomato.reset_pressed) {
@@ -1437,6 +1955,9 @@ void watch_tomato_clock_on_key(watch_key_t key)
                 s_tomato.focus = TOMATO_FOCUS_TIME_SET;
             }
             else if(s_tomato.focus == TOMATO_FOCUS_TIME_SET) {
+                s_tomato.focus = TOMATO_FOCUS_PRESETS;
+            }
+            else if(s_tomato.focus == TOMATO_FOCUS_PRESETS) {
                 s_tomato.focus = TOMATO_FOCUS_DIRECTION;
             }
             else if(s_tomato.focus == TOMATO_FOCUS_DIRECTION) {
@@ -1476,8 +1997,11 @@ void watch_tomato_clock_on_key(watch_key_t key)
             if(s_tomato.focus == TOMATO_FOCUS_TIME_SET) {
                 s_tomato.focus = TOMATO_FOCUS_BACK;
             }
-            else if(s_tomato.focus == TOMATO_FOCUS_DIRECTION) {
+            else if(s_tomato.focus == TOMATO_FOCUS_PRESETS) {
                 s_tomato.focus = TOMATO_FOCUS_TIME_SET;
+            }
+            else if(s_tomato.focus == TOMATO_FOCUS_DIRECTION) {
+                s_tomato.focus = TOMATO_FOCUS_PRESETS;
             }
             else if(s_tomato.focus == TOMATO_FOCUS_PLAY_PAUSE) {
                 s_tomato.focus = TOMATO_FOCUS_DIRECTION;
@@ -1509,6 +2033,9 @@ void watch_tomato_clock_on_key(watch_key_t key)
              */
             s_tomato.focus = TOMATO_FOCUS_HH;
             tomato_cursor_update(true);
+        }
+        else if(s_tomato.focus == TOMATO_FOCUS_PRESETS) {
+            tomato_preset_open();
         }
         else if(s_tomato.focus == TOMATO_FOCUS_DIRECTION) {
             tomato_direction_toggle();
