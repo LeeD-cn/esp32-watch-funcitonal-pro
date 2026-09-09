@@ -98,16 +98,16 @@ LV_FONT_DECLARE(cn_font_26);
 #define WATCH_COMPASS_MAG_BASE_ALPHA    0.05f
 
 /*
- * 两颗传感器在 PCB 顶层均为 180° 安装，先按相同封装平面方向映射。
- * 这里集中表达板级坐标：前向、右向、表面法向。真机六面测试若发现
- * 轴交换或符号不一致，只修改这组宏，不改倾斜补偿公式。
+ * 板级坐标定义为：屏幕顶部、屏幕右侧、屏幕朝外法向。
+ * 2026-09-09 真机五姿态日志确认 BMI270 为 Y/X/Z 对应上述三个方向；
+ * QMC5883P 映射继续沿用原二维指南针已经验证过的航向方向。
  */
 #define WATCH_COMPASS_MAG_FORWARD(x, y, z)       (x)
 #define WATCH_COMPASS_MAG_RIGHT(x, y, z)         (-(y))
 #define WATCH_COMPASS_MAG_NORMAL(x, y, z)        (-(z))
-#define WATCH_COMPASS_ACCEL_FORWARD(sample)      ((float)(sample).x_mg)
-#define WATCH_COMPASS_ACCEL_RIGHT(sample)        (-(float)(sample).y_mg)
-#define WATCH_COMPASS_ACCEL_NORMAL(sample)       (-(float)(sample).z_mg)
+#define WATCH_COMPASS_ACCEL_FORWARD(sample)      ((float)(sample).y_mg)
+#define WATCH_COMPASS_ACCEL_RIGHT(sample)        ((float)(sample).x_mg)
+#define WATCH_COMPASS_ACCEL_NORMAL(sample)       ((float)(sample).z_mg)
 
 /**
  * @brief 地磁偏角配置, 单位为度.
