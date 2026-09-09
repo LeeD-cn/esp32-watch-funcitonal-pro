@@ -6,7 +6,7 @@
  * ==================== 模块说明 ====================
  *  * 模块职责：
  * - 指南针页面 UI 和 QMC5883P 航向角刷新逻辑。
- * - 页面由外圈、圆盘、60 条刻度、N/E/S/W 方向文字、中心点和角度标签组成。
+ * - 页面由圆盘、60 条刻度、旋转方位、指北箭头、朝向基准和角度标签组成。
  * - 传感器角度会叠加地磁偏角，并按当前模块安装方向映射到表盘显示方向。
  * - 支持中英文方向文字切换，进入页面后通过 LVGL timer 周期刷新航向角。
  *
@@ -57,6 +57,18 @@ LV_FONT_DECLARE(cn_font_26);
 #define WATCH_COMPASS_CARDINAL_R        74
 #define WATCH_COMPASS_CARDINAL_COUNT    4
 #define WATCH_COMPASS_PI                3.14159265358979323846f
+
+/* 中央指北箭头。角度与旋转圆盘使用同一屏幕坐标定义。 */
+#define WATCH_COMPASS_NEEDLE_NORTH_R    53
+#define WATCH_COMPASS_NEEDLE_SOUTH_R    31
+#define WATCH_COMPASS_ARROW_BASE_R      37
+#define WATCH_COMPASS_ARROW_HALF_W      9
+
+/* 航向显示固定在圆盘下部，为阶段 5 的调平提示预留中心附近空间。 */
+#define WATCH_COMPASS_HEADING_Y_OFFSET  54
+
+/* 圆周指数平滑系数。用向量平滑可正确处理 359° 到 0° 的跨界。 */
+#define WATCH_COMPASS_SMOOTH_ALPHA      0.24f
 
 /**
  * @brief 地磁偏角配置, 单位为度.
@@ -120,7 +132,7 @@ typedef struct {
      * @brief 60 条圆周刻度线.
      */
     lv_obj_t *tick_line[WATCH_COMPASS_TICK_COUNT];
-    lv_point_t tick_points[WATCH_COMPASS_TICK_COUNT][2];
+    lv_point_precise_t tick_points[WATCH_COMPASS_TICK_COUNT][2];
 
     /**
      * @brief N/E/S/W 四个方向字母.
@@ -132,10 +144,28 @@ typedef struct {
      */
     bool cardinal_chinese;
 
+    /* 指北箭头：北向红色轴线和箭头两翼，南向为灰色尾线。 */
+    lv_obj_t *north_line;
+    lv_obj_t *north_arrow_left;
+    lv_obj_t *north_arrow_right;
+    lv_obj_t *south_line;
+    lv_point_precise_t north_points[2];
+    lv_point_precise_t north_arrow_left_points[2];
+    lv_point_precise_t north_arrow_right_points[2];
+    lv_point_precise_t south_points[2];
+
     /**
      * @brief 中心小圆点.
      */
     lv_obj_t *center_dot;
+
+    /**
+     * @brief 屏幕顶部固定朝向基准.
+     */
+    lv_obj_t *reference_left;
+    lv_obj_t *reference_right;
+    lv_point_precise_t reference_left_points[2];
+    lv_point_precise_t reference_right_points[2];
 
     /**
      * @brief 航向角文本对象.
@@ -156,6 +186,11 @@ typedef struct {
      * @brief 传感器是否初始化完成.
      */
     bool sensor_ready;
+
+    /* 航向圆周平滑状态，保存单位向量而不是角度以避免北向跨界跳变。 */
+    bool heading_filter_ready;
+    float heading_filter_x;
+    float heading_filter_y;
 
     /**
      * @brief QMC5883P 校准参数.
@@ -214,6 +249,9 @@ static void watch_compass_apply_language(bool force)
         }
 
         lv_obj_set_style_text_font(s_compass.cardinal_label[i], cardinal_font, 0);
+        lv_obj_set_style_text_color(s_compass.cardinal_label[i],
+                                    i == 0 ? lv_color_hex(0xff4d5a) : lv_color_hex(0xd8e6f3),
+                                    0);
         lv_label_set_text(s_compass.cardinal_label[i], cardinal_text[i]);
     }
 }
@@ -252,6 +290,34 @@ static float watch_compass_normalize_heading(float heading_deg)
     }
 
     return heading_deg;
+}
+
+/**
+ * @brief 对航向角进行跨 0° 安全的圆周平滑。
+ *
+ * @note 平滑只改善界面抖动，不替代磁力计校准或阶段 5 的倾斜补偿。
+ */
+static float watch_compass_smooth_heading(float heading_deg)
+{
+    float heading_rad = heading_deg * WATCH_COMPASS_PI / 180.0f;
+    float sample_x = cosf(heading_rad);
+    float sample_y = sinf(heading_rad);
+
+    if(!s_compass.heading_filter_ready) {
+        s_compass.heading_filter_x = sample_x;
+        s_compass.heading_filter_y = sample_y;
+        s_compass.heading_filter_ready = true;
+    }
+    else {
+        s_compass.heading_filter_x += WATCH_COMPASS_SMOOTH_ALPHA *
+                                      (sample_x - s_compass.heading_filter_x);
+        s_compass.heading_filter_y += WATCH_COMPASS_SMOOTH_ALPHA *
+                                      (sample_y - s_compass.heading_filter_y);
+    }
+
+    return watch_compass_normalize_heading(
+        atan2f(s_compass.heading_filter_y, s_compass.heading_filter_x) *
+        180.0f / WATCH_COMPASS_PI);
 }
 
 /**
@@ -308,7 +374,44 @@ static void watch_compass_show_text(const char *text)
     }
 
     lv_label_set_text(s_compass.heading_label, text);
-    lv_obj_center(s_compass.heading_label);
+    lv_obj_align(s_compass.heading_label, LV_ALIGN_CENTER, 0, WATCH_COMPASS_HEADING_Y_OFFSET);
+}
+
+/**
+ * @brief 设置方向图形是否可见。
+ */
+static void watch_compass_set_direction_visible(bool visible)
+{
+    lv_obj_t *objects[] = {
+        s_compass.north_line,
+        s_compass.north_arrow_left,
+        s_compass.north_arrow_right,
+        s_compass.south_line,
+        s_compass.center_dot,
+    };
+
+    for(size_t i = 0; i < sizeof(objects) / sizeof(objects[0]); i++) {
+        if(objects[i] == NULL) {
+            continue;
+        }
+
+        if(visible) {
+            lv_obj_clear_flag(objects[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        else {
+            lv_obj_add_flag(objects[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+/**
+ * @brief 显示传感器错误并隐藏无效方向箭头。
+ */
+static void watch_compass_show_error(const char *text)
+{
+    s_compass.heading_filter_ready = false;
+    watch_compass_set_direction_visible(false);
+    watch_compass_show_text(text);
 }
 
 /**
@@ -406,6 +509,106 @@ static void watch_compass_update_dial(float heading_deg)
 }
 
 /**
+ * @brief 更新中央指北箭头。
+ *
+ * @note 航向表示屏幕上方指向的方位，因此真实北方在屏幕上的角度为 -heading。
+ */
+static void watch_compass_update_needle(float heading_deg)
+{
+    float north_screen_deg = -heading_deg;
+    float north_rad = north_screen_deg * WATCH_COMPASS_PI / 180.0f;
+    float perpendicular_x = cosf(north_rad);
+    float perpendicular_y = sinf(north_rad);
+    lv_coord_t tip_x = 0;
+    lv_coord_t tip_y = 0;
+    lv_coord_t base_x = 0;
+    lv_coord_t base_y = 0;
+    lv_coord_t south_x = 0;
+    lv_coord_t south_y = 0;
+
+    if(s_compass.north_line == NULL ||
+       s_compass.north_arrow_left == NULL ||
+       s_compass.north_arrow_right == NULL ||
+       s_compass.south_line == NULL) {
+        return;
+    }
+
+    watch_compass_polar_to_xy(north_screen_deg, WATCH_COMPASS_NEEDLE_NORTH_R, &tip_x, &tip_y);
+    watch_compass_polar_to_xy(north_screen_deg, WATCH_COMPASS_ARROW_BASE_R, &base_x, &base_y);
+    watch_compass_polar_to_xy(north_screen_deg + 180.0f,
+                              WATCH_COMPASS_NEEDLE_SOUTH_R,
+                              &south_x,
+                              &south_y);
+
+    s_compass.north_points[0] = (lv_point_precise_t){WATCH_COMPASS_CENTER_X, WATCH_COMPASS_CENTER_Y};
+    s_compass.north_points[1] = (lv_point_precise_t){tip_x, tip_y};
+    lv_line_set_points(s_compass.north_line, s_compass.north_points, 2);
+
+    s_compass.north_arrow_left_points[0] = (lv_point_precise_t){tip_x, tip_y};
+    s_compass.north_arrow_left_points[1] = (lv_point_precise_t){
+        watch_compass_round_coord((float)base_x + perpendicular_x * WATCH_COMPASS_ARROW_HALF_W),
+        watch_compass_round_coord((float)base_y + perpendicular_y * WATCH_COMPASS_ARROW_HALF_W),
+    };
+    lv_line_set_points(s_compass.north_arrow_left,
+                       s_compass.north_arrow_left_points,
+                       2);
+
+    s_compass.north_arrow_right_points[0] = (lv_point_precise_t){tip_x, tip_y};
+    s_compass.north_arrow_right_points[1] = (lv_point_precise_t){
+        watch_compass_round_coord((float)base_x - perpendicular_x * WATCH_COMPASS_ARROW_HALF_W),
+        watch_compass_round_coord((float)base_y - perpendicular_y * WATCH_COMPASS_ARROW_HALF_W),
+    };
+    lv_line_set_points(s_compass.north_arrow_right,
+                       s_compass.north_arrow_right_points,
+                       2);
+
+    s_compass.south_points[0] = (lv_point_precise_t){WATCH_COMPASS_CENTER_X, WATCH_COMPASS_CENTER_Y};
+    s_compass.south_points[1] = (lv_point_precise_t){south_x, south_y};
+    lv_line_set_points(s_compass.south_line, s_compass.south_points, 2);
+
+    watch_compass_set_direction_visible(true);
+}
+
+/**
+ * @brief 创建一条页面坐标系中的非交互线条。
+ */
+static lv_obj_t *watch_compass_create_line(uint32_t color, int width, lv_opa_t opa)
+{
+    lv_obj_t *line = lv_line_create(s_compass.page);
+
+    lv_obj_set_pos(line, 0, 0);
+    lv_obj_set_style_line_color(line, lv_color_hex(color), 0);
+    lv_obj_set_style_line_width(line, width, 0);
+    lv_obj_set_style_line_rounded(line, true, 0);
+    lv_obj_set_style_line_opa(line, opa, 0);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
+
+    return line;
+}
+
+/**
+ * @brief 创建中央指北箭头和顶部固定朝向基准。
+ */
+static void watch_compass_create_direction_indicator(void)
+{
+    s_compass.south_line = watch_compass_create_line(0x8ca0b3, 4, LV_OPA_80);
+    s_compass.north_line = watch_compass_create_line(0xff3347, 5, LV_OPA_COVER);
+    s_compass.north_arrow_left = watch_compass_create_line(0xff3347, 4, LV_OPA_COVER);
+    s_compass.north_arrow_right = watch_compass_create_line(0xff3347, 4, LV_OPA_COVER);
+
+    s_compass.reference_left_points[0] = (lv_point_precise_t){112, 18};
+    s_compass.reference_left_points[1] = (lv_point_precise_t){120, 10};
+    s_compass.reference_right_points[0] = (lv_point_precise_t){120, 10};
+    s_compass.reference_right_points[1] = (lv_point_precise_t){128, 18};
+    s_compass.reference_left = watch_compass_create_line(0xffd45a, 3, LV_OPA_COVER);
+    s_compass.reference_right = watch_compass_create_line(0xffd45a, 3, LV_OPA_COVER);
+    lv_line_set_points(s_compass.reference_left, s_compass.reference_left_points, 2);
+    lv_line_set_points(s_compass.reference_right, s_compass.reference_right_points, 2);
+
+    watch_compass_update_needle(0.0f);
+}
+
+/**
  * @brief 创建半径为 100 的圆、刻度和 N/E/S/W 字母.
  */
 /**
@@ -427,7 +630,7 @@ static void watch_compass_create_dial(void)
     lv_obj_set_style_radius(s_compass.outer_ring, WATCH_COMPASS_OUTER_RING_RADIUS, 0);
     lv_obj_set_style_bg_opa(s_compass.outer_ring, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_compass.outer_ring, 2, 0);
-    lv_obj_set_style_border_color(s_compass.outer_ring, lv_color_hex(0xffd400), 0);
+    lv_obj_set_style_border_color(s_compass.outer_ring, lv_color_hex(0x29485f), 0);
     lv_obj_set_style_border_opa(s_compass.outer_ring, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_compass.outer_ring, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_compass.outer_ring, LV_OBJ_FLAG_CLICKABLE);
@@ -439,7 +642,7 @@ static void watch_compass_create_dial(void)
     lv_obj_set_style_radius(s_compass.ring, WATCH_COMPASS_RADIUS, 0);
     lv_obj_set_style_bg_opa(s_compass.ring, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_compass.ring, 2, 0);
-    lv_obj_set_style_border_color(s_compass.ring, lv_color_hex(0x1fd16a), 0);
+    lv_obj_set_style_border_color(s_compass.ring, lv_color_hex(0x46c7e8), 0);
     lv_obj_set_style_border_opa(s_compass.ring, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_compass.ring, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_compass.ring, LV_OBJ_FLAG_CLICKABLE);
@@ -451,8 +654,10 @@ static void watch_compass_create_dial(void)
         s_compass.tick_line[i] = lv_line_create(s_compass.page);
         lv_obj_set_pos(s_compass.tick_line[i], 0, 0);
         lv_obj_set_style_line_width(s_compass.tick_line[i], cardinal_tick ? 3 : (major_tick ? 2 : 1), 0);
-        lv_obj_set_style_line_color(s_compass.tick_line[i], cardinal_tick ? lv_color_white() : lv_color_hex(0x4060ff), 0);
-        lv_obj_set_style_line_opa(s_compass.tick_line[i], cardinal_tick ? LV_OPA_COVER : LV_OPA_70, 0);
+        lv_obj_set_style_line_color(s_compass.tick_line[i],
+                                    cardinal_tick ? lv_color_hex(0xf4f8fb) : lv_color_hex(0x57839e),
+                                    0);
+        lv_obj_set_style_line_opa(s_compass.tick_line[i], cardinal_tick ? LV_OPA_COVER : LV_OPA_60, 0);
         lv_obj_clear_flag(s_compass.tick_line[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
@@ -460,7 +665,9 @@ static void watch_compass_create_dial(void)
         s_compass.cardinal_label[i] = lv_label_create(s_compass.page);
         lv_obj_set_size(s_compass.cardinal_label[i], 28, 28);
         lv_obj_set_style_text_font(s_compass.cardinal_label[i], &lv_font_montserrat_26, 0);
-        lv_obj_set_style_text_color(s_compass.cardinal_label[i], lv_color_white(), 0);
+        lv_obj_set_style_text_color(s_compass.cardinal_label[i],
+                                    i == 0 ? lv_color_hex(0xff4d5a) : lv_color_hex(0xd8e6f3),
+                                    0);
         lv_obj_set_style_text_align(s_compass.cardinal_label[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_pad_all(s_compass.cardinal_label[i], 0, 0);
         lv_label_set_text(s_compass.cardinal_label[i], s_cardinal_text_en[i]);
@@ -469,12 +676,14 @@ static void watch_compass_create_dial(void)
 
     watch_compass_apply_language(true);
 
+    watch_compass_create_direction_indicator();
+
     s_compass.center_dot = lv_obj_create(s_compass.page);
     lv_obj_remove_style_all(s_compass.center_dot);
-    lv_obj_set_size(s_compass.center_dot, 8, 8);
-    lv_obj_set_pos(s_compass.center_dot, WATCH_COMPASS_CENTER_X - 4, WATCH_COMPASS_CENTER_Y - 4);
-    lv_obj_set_style_radius(s_compass.center_dot, 4, 0);
-    lv_obj_set_style_bg_color(s_compass.center_dot, lv_color_hex(0x1fd16a), 0);
+    lv_obj_set_size(s_compass.center_dot, 10, 10);
+    lv_obj_set_pos(s_compass.center_dot, WATCH_COMPASS_CENTER_X - 5, WATCH_COMPASS_CENTER_Y - 5);
+    lv_obj_set_style_radius(s_compass.center_dot, 5, 0);
+    lv_obj_set_style_bg_color(s_compass.center_dot, lv_color_hex(0xf4f8fb), 0);
     lv_obj_set_style_bg_opa(s_compass.center_dot, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_compass.center_dot, LV_OBJ_FLAG_CLICKABLE);
 
@@ -537,7 +746,7 @@ static void watch_compass_update_heading(void)
     if(!s_compass.sensor_ready) {
         watch_compass_try_init_sensor();
         if(!s_compass.sensor_ready) {
-            watch_compass_show_text("ERR");
+            watch_compass_show_error("NO SENSOR");
             return;
         }
     }
@@ -548,19 +757,19 @@ static void watch_compass_update_heading(void)
     }
 
     if(result == QMC5883P_ERR_OVERFLOW) {
-        watch_compass_show_text("OVFL");
+        watch_compass_show_error("OVERFLOW");
         return;
     }
 
     if(result != QMC5883P_OK) {
         s_compass.sensor_ready = false;
-        watch_compass_show_text("ERR");
+        watch_compass_show_error("SENSOR ERR");
         return;
     }
 
     result = qmc5883p_apply_calibration(&raw, &s_compass.calibration, &x, &y, &z);
     if(result != QMC5883P_OK) {
-        watch_compass_show_text("ERR");
+        watch_compass_show_error("DATA ERR");
         return;
     }
 
@@ -573,8 +782,10 @@ static void watch_compass_update_heading(void)
                                                  s_compass.calibration.declination_deg);
     heading_deg = watch_compass_normalize_heading(
         heading_deg + WATCH_COMPASS_MOUNT_OFFSET_DEG);
+    heading_deg = watch_compass_smooth_heading(heading_deg);
 
     watch_compass_update_dial(heading_deg);
+    watch_compass_update_needle(heading_deg);
     watch_compass_format_heading(heading_deg, text, sizeof(text));
     watch_compass_show_text(text);
 }
@@ -612,17 +823,19 @@ static void watch_compass_create_heading_label(void)
 {
     s_compass.heading_label = lv_label_create(s_compass.page);
     lv_obj_set_style_text_font(s_compass.heading_label, &lv_font_montserrat_26, 0);
-    lv_obj_set_style_text_color(s_compass.heading_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(s_compass.heading_label, lv_color_hex(0xf4f8fb), 0);
     lv_obj_set_style_text_align(s_compass.heading_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_bg_color(s_compass.heading_label, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_compass.heading_label, LV_OPA_50, 0);
-    lv_obj_set_style_radius(s_compass.heading_label, 8, 0);
-    lv_obj_set_style_pad_left(s_compass.heading_label, 8, 0);
-    lv_obj_set_style_pad_right(s_compass.heading_label, 8, 0);
-    lv_obj_set_style_pad_top(s_compass.heading_label, 2, 0);
-    lv_obj_set_style_pad_bottom(s_compass.heading_label, 2, 0);
+    lv_obj_set_style_bg_color(s_compass.heading_label, lv_color_hex(0x102638), 0);
+    lv_obj_set_style_bg_opa(s_compass.heading_label, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(s_compass.heading_label, 1, 0);
+    lv_obj_set_style_border_color(s_compass.heading_label, lv_color_hex(0x46c7e8), 0);
+    lv_obj_set_style_radius(s_compass.heading_label, 12, 0);
+    lv_obj_set_style_pad_left(s_compass.heading_label, 10, 0);
+    lv_obj_set_style_pad_right(s_compass.heading_label, 10, 0);
+    lv_obj_set_style_pad_top(s_compass.heading_label, 3, 0);
+    lv_obj_set_style_pad_bottom(s_compass.heading_label, 3, 0);
     lv_label_set_text(s_compass.heading_label, "--");
-    lv_obj_center(s_compass.heading_label);
+    lv_obj_align(s_compass.heading_label, LV_ALIGN_CENTER, 0, WATCH_COMPASS_HEADING_Y_OFFSET);
     lv_obj_clear_flag(s_compass.heading_label, LV_OBJ_FLAG_CLICKABLE);
 }
 
@@ -641,7 +854,7 @@ lv_obj_t *watch_compass_create(lv_obj_t *parent)
     lv_obj_remove_style_all(s_compass.page);
     lv_obj_set_size(s_compass.page, WATCH_SCREEN_W, WATCH_SCREEN_H);
     lv_obj_set_pos(s_compass.page, 0, 0);
-    lv_obj_set_style_bg_color(s_compass.page, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(s_compass.page, lv_color_hex(0x07141f), 0);
     lv_obj_set_style_bg_opa(s_compass.page, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_compass.page, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(s_compass.page, LV_OBJ_FLAG_CLICKABLE);
@@ -666,6 +879,7 @@ lv_obj_t *watch_compass_create(lv_obj_t *parent)
 void watch_compass_reset(void)
 {
     s_compass.wants_back = false;
+    s_compass.heading_filter_ready = false;
     watch_compass_apply_language(true);
 
     if(s_compass.heading_label != NULL) {
