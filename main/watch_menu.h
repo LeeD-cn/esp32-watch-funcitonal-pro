@@ -67,6 +67,8 @@ bool watch_menu_is_weather_selected(void);
  * @return true 已选择指南针。
  */
 bool watch_menu_is_compass_selected(void);
+/** 判断当前是否选择演示遥控。 */
+bool watch_menu_is_presentation_selected(void);
 
 
 #ifdef __cplusplus

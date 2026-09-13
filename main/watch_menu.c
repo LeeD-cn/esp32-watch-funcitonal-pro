@@ -27,7 +27,7 @@
 #define WATCH_SCREEN_W          240
 #define WATCH_SCREEN_H          240
 
-#define MENU_ITEM_COUNT         6
+#define MENU_ITEM_COUNT         7
 
 #define MENU_TITLE_Y            13
 #define MENU_LINE_X             24
@@ -54,6 +54,7 @@
 
 LV_FONT_DECLARE(cn_font_26);
 LV_FONT_DECLARE(device_info_font_20);
+LV_FONT_DECLARE(presentation_font_20);
 LV_IMG_DECLARE(menu_bg);
 
 /**
@@ -90,6 +91,7 @@ static const menu_title_i18n_t s_menu_titles[MENU_ITEM_COUNT] = {
     {"Device Info", "设备信息"},
     {"Weather", "天气"},
     {"Compass", "指南针"},
+    {"Presentation", "演示遥控"},
 };
 
 /**
@@ -126,6 +128,9 @@ static const lv_font_t *menu_title_font(void)
     if(watch_language_is_chinese() && s_menu.index == 3) {
         return &device_info_font_20;
     }
+    if(watch_language_is_chinese() && s_menu.index == 6) {
+        return &presentation_font_20;
+    }
     return watch_language_is_chinese() ? &cn_font_26 : &lv_font_montserrat_26;
 }
 
@@ -137,7 +142,7 @@ LV_IMG_DECLARE(weather_icon);
 LV_IMG_DECLARE(compass_icon);
 
 
-static const lv_img_dsc_t *s_menu_icons[MENU_ITEM_COUNT] = {
+static const lv_img_dsc_t *s_menu_icons[6] = {
     &back_icon,
     &tomato_clock_icon,
     &game_icon,
@@ -157,41 +162,46 @@ static const lv_img_dsc_t *s_menu_icons[MENU_ITEM_COUNT] = {
  * @param icon 输入或输出参数，具体含义见函数内部使用方式。
  * @param index 输入或输出参数，具体含义见函数内部使用方式。
  */
-static void menu_icon_apply(lv_obj_t *icon, uint8_t index)
-{
-    if(icon == NULL || index >= MENU_ITEM_COUNT) {
-        return;
-    }
-
-    lv_img_set_src(icon, s_menu_icons[index]);
-
-
-    lv_obj_align(icon, LV_ALIGN_CENTER, 0, 0);
-}
-
-
-/**
- * @brief menu_icon_create 辅助函数。
- *
- * 详细说明：
- * - 封装局部逻辑，使主流程更清晰。
- *
- * @param parent 输入或输出参数，具体含义见调用处和函数内部使用方式。
- * @param index 输入或输出参数，具体含义见调用处和函数内部使用方式。
- *
- * @return 函数执行结果或计算得到的值，具体语义见返回路径。
- */
 static lv_obj_t *menu_icon_create(lv_obj_t *parent, uint8_t index)
 {
-    lv_obj_t *icon = lv_img_create(parent);
+    if(parent == NULL || index >= MENU_ITEM_COUNT) {
+        return NULL;
+    }
 
+    if(index < 6) {
+        lv_obj_t *icon = lv_img_create(parent);
+        lv_img_set_src(icon, s_menu_icons[index]);
+        lv_obj_align(icon, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+        return icon;
+    }
 
-    lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    /* 演示遥控图标用 LVGL 图形绘制，避免为简单线框增加大尺寸位图资源。 */
+    lv_obj_t *screen = lv_obj_create(parent);
+    lv_obj_remove_style_all(screen);
+    lv_obj_set_size(screen, 96, 70);
+    lv_obj_align(screen, LV_ALIGN_CENTER, 0, -5);
+    lv_obj_set_style_border_width(screen, 4, 0);
+    lv_obj_set_style_border_color(screen, lv_color_white(), 0);
+    lv_obj_set_style_radius(screen, 8, 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x20345E), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    menu_icon_apply(icon, index);
+    lv_obj_t *play = lv_label_create(screen);
+    lv_obj_set_style_text_font(play, &lv_font_montserrat_36, 0);
+    lv_obj_set_style_text_color(play, lv_color_hex(0x65A4FF), 0);
+    lv_label_set_text(play, LV_SYMBOL_PLAY);
+    lv_obj_center(play);
 
-    return icon;
+    lv_obj_t *stand = lv_obj_create(parent);
+    lv_obj_remove_style_all(stand);
+    lv_obj_set_size(stand, 5, 18);
+    lv_obj_align(stand, LV_ALIGN_CENTER, 0, 39);
+    lv_obj_set_style_bg_color(stand, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(stand, LV_OPA_COVER, 0);
+    return screen;
 }
 
 /**
@@ -265,7 +275,8 @@ static void menu_update_current(void)
     }
 
     if(s_menu.icon_cur) {
-        menu_icon_apply(s_menu.icon_cur, s_menu.index);
+        lv_obj_clean(s_menu.icon_area);
+        s_menu.icon_cur = menu_icon_create(s_menu.icon_area, s_menu.index);
     }
 
     menu_slider_update();
@@ -485,6 +496,11 @@ bool watch_menu_is_weather_selected(void)
 bool watch_menu_is_compass_selected(void)
 {
     return s_menu.index == 5;
+}
+
+bool watch_menu_is_presentation_selected(void)
+{
+    return s_menu.index == 6;
 }
 
 /**

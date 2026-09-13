@@ -18,6 +18,10 @@ target_link_libraries(ESPWatchUpperComputer PRIVATE
     Qt6::SerialPort
 )
 
+if(WIN32)
+    target_link_libraries(ESPWatchUpperComputer PRIVATE user32)
+endif()
+
 set_target_properties(ESPWatchUpperComputer PROPERTIES
     WIN32_EXECUTABLE TRUE
 )

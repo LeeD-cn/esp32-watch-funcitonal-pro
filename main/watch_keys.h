@@ -20,7 +20,10 @@ typedef enum {
     WATCH_KEY_1,
     WATCH_KEY_2,
     WATCH_KEY_3,
+    WATCH_KEY_1_RELEASE,
     WATCH_KEY_2_RELEASE,
+    WATCH_KEY_3_RELEASE,
+    WATCH_KEY_2_LONG,
     WATCH_KEY_4_SHORT,
     WATCH_KEY_4_LONG,
 } watch_key_t;

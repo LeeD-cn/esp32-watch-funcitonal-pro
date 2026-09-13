@@ -38,6 +38,7 @@
 #define KEY_DEBOUNCE_MS         80
 #define KEY_REPEAT_START_MS     450
 #define KEY_REPEAT_INTERVAL_MS  120
+#define KEY2_LONG_PRESS_MS      1000
 #define KEY4_SCAN_INTERVAL_MS   20
 #define KEY4_LONG_PRESS_MS      1200
 
@@ -59,6 +60,8 @@ static QueueHandle_t s_key_evt_queue = NULL;
 static TaskHandle_t s_key_task_handle = NULL;
 /* KEY4 电源键扫描任务句柄。 */
 static TaskHandle_t s_key4_task_handle = NULL;
+/* KEY2 释放边沿可能已经在 GPIO 队列中；该标志避免长按检测后重复发送释放事件。 */
+static bool s_key2_pressed = false;
 
 static key_map_t s_key_map[] = {
     {KEY1_GPIO, WATCH_KEY_1, 0},
@@ -211,6 +214,28 @@ static void key_scan_task(void *arg)
                 watch_key_t key = s_key_map[idx].key;
                 key_send_event(key);
 
+                if(key == WATCH_KEY_2) {
+                    TickType_t press_tick = xTaskGetTickCount();
+                    bool long_sent = false;
+                    s_key2_pressed = true;
+
+                    while(gpio_get_level(s_key_map[idx].gpio) == 0) {
+                        TickType_t held = xTaskGetTickCount() - press_tick;
+                        if(!long_sent && held >= pdMS_TO_TICKS(KEY2_LONG_PRESS_MS)) {
+                            key_send_event(WATCH_KEY_2_LONG);
+                            long_sent = true;
+                        }
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                    if(gpio_get_level(s_key_map[idx].gpio) == 1) {
+                        key_send_event(WATCH_KEY_2_RELEASE);
+                    }
+                    s_key2_pressed = false;
+                    s_key_map[idx].last_tick = xTaskGetTickCount();
+                }
+
 
                 if(key == WATCH_KEY_1 || key == WATCH_KEY_3) {
                     vTaskDelay(pdMS_TO_TICKS(KEY_REPEAT_START_MS));
@@ -219,6 +244,9 @@ static void key_scan_task(void *arg)
                         key_send_event(key);
                         vTaskDelay(pdMS_TO_TICKS(KEY_REPEAT_INTERVAL_MS));
                     }
+
+                    key_send_event(key == WATCH_KEY_1 ?
+                                   WATCH_KEY_1_RELEASE : WATCH_KEY_3_RELEASE);
 
                     s_key_map[idx].last_tick = xTaskGetTickCount();
                 }
@@ -230,8 +258,9 @@ static void key_scan_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(20));
 
             if(gpio_get_level(s_key_map[idx].gpio) == 1 &&
-               s_key_map[idx].key == WATCH_KEY_2) {
+               s_key_map[idx].key == WATCH_KEY_2 && s_key2_pressed) {
                 key_send_event(WATCH_KEY_2_RELEASE);
+                s_key2_pressed = false;
             }
         }
     }

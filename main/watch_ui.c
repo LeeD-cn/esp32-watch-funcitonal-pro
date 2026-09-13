@@ -21,6 +21,7 @@
 #include "watch_e_card.h"
 #include "watch_weather.h"
 #include "watch_compass.h"
+#include "watch_presentation.h"
 #include "watch_settings.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -49,6 +50,7 @@ void watch_game_destroy(void);
 void watch_e_card_destroy(void);
 void watch_weather_destroy(void);
 void watch_compass_destroy(void);
+void watch_presentation_destroy(void);
 void watch_settings_destroy(void);
 
 /**
@@ -64,6 +66,7 @@ typedef enum {
     UI_PAGE_E_CARD,
     UI_PAGE_WEATHER,
     UI_PAGE_COMPASS,
+    UI_PAGE_PRESENTATION,
     UI_PAGE_SETTINGS,
 } ui_page_t;
 
@@ -82,6 +85,7 @@ typedef struct {
     lv_obj_t *e_card_page;
     lv_obj_t *weather_page;
     lv_obj_t *compass_page;
+    lv_obj_t *presentation_page;
     lv_obj_t *settings_page;
 
     ui_page_t page;
@@ -122,6 +126,9 @@ static lv_obj_t **ui_page_slot(ui_page_t page)
 
     case UI_PAGE_COMPASS:
         return &s_ui.compass_page;
+
+    case UI_PAGE_PRESENTATION:
+        return &s_ui.presentation_page;
 
     case UI_PAGE_SETTINGS:
         return &s_ui.settings_page;
@@ -192,6 +199,10 @@ static lv_obj_t *ui_create_page(ui_page_t page)
         *slot = watch_compass_create(s_ui.scr);
         break;
 
+    case UI_PAGE_PRESENTATION:
+        *slot = watch_presentation_create(s_ui.scr);
+        break;
+
     case UI_PAGE_SETTINGS:
         *slot = watch_settings_create(s_ui.scr);
         break;
@@ -255,6 +266,11 @@ static void ui_destroy_page(ui_page_t page)
 
     case UI_PAGE_COMPASS:
         watch_compass_destroy();
+        *slot = NULL;
+        break;
+
+    case UI_PAGE_PRESENTATION:
+        watch_presentation_destroy();
         *slot = NULL;
         break;
 
@@ -616,6 +632,26 @@ static void switch_compass_to_menu(void)
     start_y_anim(s_ui.compass_page, 0, WATCH_SCREEN_H, page_anim_done_cb);
 }
 
+static void switch_to_presentation(void)
+{
+    if(s_ui.page != UI_PAGE_MENU || !ui_begin_switch(UI_PAGE_PRESENTATION)) return;
+    watch_presentation_reset();
+    lv_obj_move_foreground(s_ui.presentation_page);
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.presentation_page, WATCH_SCREEN_H);
+    start_y_anim(s_ui.menu_page, 0, -WATCH_SCREEN_H, NULL);
+    start_y_anim(s_ui.presentation_page, WATCH_SCREEN_H, 0, page_anim_done_cb);
+}
+
+static void switch_presentation_to_menu(void)
+{
+    if(s_ui.page != UI_PAGE_PRESENTATION || !ui_begin_switch(UI_PAGE_MENU)) return;
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.presentation_page, 0);
+    lv_obj_move_foreground(s_ui.presentation_page);
+    start_y_anim(s_ui.presentation_page, 0, WATCH_SCREEN_H, page_anim_done_cb);
+}
+
 /**
  * @brief 创建手表 UI 根屏幕和初始页面。
  */
@@ -712,6 +748,9 @@ void watch_ui_on_key(watch_key_t key)
             else if(watch_menu_is_compass_selected()) {
                 switch_to_compass();
             }
+            else if(watch_menu_is_presentation_selected()) {
+                switch_to_presentation();
+            }
         }
         return;
     }
@@ -766,6 +805,12 @@ void watch_ui_on_key(watch_key_t key)
         return;
     }
 
+    if(s_ui.page == UI_PAGE_PRESENTATION) {
+        watch_presentation_on_key(key);
+        if(watch_presentation_wants_back()) switch_presentation_to_menu();
+        return;
+    }
+
     if(s_ui.page == UI_PAGE_SETTINGS) {
         watch_settings_on_key(key);
 
@@ -775,6 +820,11 @@ void watch_ui_on_key(watch_key_t key)
 
         return;
     }
+}
+
+bool watch_ui_should_keep_awake(void)
+{
+    return s_ui.page == UI_PAGE_PRESENTATION || s_ui.target_page == UI_PAGE_PRESENTATION;
 }
 
 

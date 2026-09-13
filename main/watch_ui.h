@@ -6,6 +6,7 @@
 #ifndef WATCH_UI_H
 #define WATCH_UI_H
 
+#include <stdbool.h>
 #include "watch_keys.h"
 
 #ifdef __cplusplus
@@ -22,6 +23,9 @@ void watch_ui_create(void);
  * @param key 按键值。
  */
 void watch_ui_on_key(watch_key_t key);
+
+/** 演示遥控页面可见时保持亮屏和 Wi-Fi，KEY4 主动息屏仍由系统处理。 */
+bool watch_ui_should_keep_awake(void);
 
 #ifdef __cplusplus
 }

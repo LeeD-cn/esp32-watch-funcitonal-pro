@@ -458,7 +458,8 @@ static bool watch_handle_global_key(watch_key_t key)
  */
 static bool watch_auto_off_check(TickType_t *last_key1_to_key3_tick)
 {
-    if(last_key1_to_key3_tick == NULL || !watch_settings_auto_off_enabled()) {
+    if(last_key1_to_key3_tick == NULL || !watch_settings_auto_off_enabled() ||
+       watch_ui_should_keep_awake()) {
         return false;
     }
 

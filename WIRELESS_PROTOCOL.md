@@ -29,4 +29,32 @@
 
 阶段 7、8 使用的操作请求必须包含 `v`、`type`、`session`、`op_id`、`action` 和有效期。电脑是协同状态的最终来源，并按 `session + op_id` 去重；重复请求返回第一次的处理结果。确认需区分收到、已处理和拒绝。状态快照使用任务 ID 与递增版本，旧版本不能覆盖新状态。
 
-当前阶段只启用握手、认证和心跳；未知业务类型会记录日志，不执行电脑控制。
+## 演示遥控（阶段 8）
+
+手表进入或退出演示遥控页面时发送可恢复的页面状态；它可以在重连后重新同步：
+
+```json
+{"v":1,"type":"presentation_state","session":"...","active":true}
+```
+
+电脑端演示开关默认关闭，每次新连接都必须由用户重新开启。状态变化发送：
+
+```json
+{"v":1,"type":"presentation_status","session":"...","enabled":true}
+```
+
+一次拨轮操作发送一个瞬时请求。`op_id` 在当前手表运行期间递增，发送队列超过 `ttl_ms` 后丢弃：
+
+```json
+{"v":1,"type":"presentation_control","session":"...","op_id":12,"action":"next","ttl_ms":1500}
+```
+
+`action` 为 `previous` 或 `next`。电脑按 `session + op_id` 去重，重复请求返回首次结果但不再次模拟按键。电脑返回：
+
+```json
+{"v":1,"type":"presentation_result","session":"...","op_id":12,"outcome":"processed","reason":"next"}
+```
+
+`outcome` 为 `processed` 或 `rejected`。常见拒绝原因包括 `disabled`、`watch_inactive`、`foreground_not_slideshow` 和 `send_input_failed`。`processed` 只表示 Windows 已接受模拟按键，不代表已读取并确认幻灯片页码变化。
+
+电脑仅在演示开关开启、手表页面活动、会话匹配，并且前台是 WPS 演示或 PowerPoint 的全屏放映窗口时执行 `Page Up` / `Page Down`。断线时瞬时请求清空，重连后不补发。

@@ -5,6 +5,8 @@
 #ifndef WATCH_HOST_LINK_H
 #define WATCH_HOST_LINK_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -20,6 +22,21 @@ typedef enum {
     WATCH_HOST_LINK_DISCONNECTED,
 } watch_host_link_state_t;
 
+typedef enum {
+    WATCH_PRESENTATION_RESULT_NONE = 0,
+    WATCH_PRESENTATION_RESULT_PENDING,
+    WATCH_PRESENTATION_RESULT_PROCESSED,
+    WATCH_PRESENTATION_RESULT_REJECTED,
+} watch_presentation_result_t;
+
+typedef struct {
+    bool server_enabled;
+    watch_presentation_result_t result;
+    uint32_t op_id;
+    uint32_t revision;
+    char reason[48];
+} watch_presentation_snapshot_t;
+
 /** 启动后台连接任务；重复调用不会重复创建。 */
 esp_err_t watch_host_link_start(void);
 
@@ -28,6 +45,15 @@ watch_host_link_state_t watch_host_link_get_state(void);
 
 /** 获取简短、稳定的状态文字。 */
 const char *watch_host_link_state_text(watch_host_link_state_t state);
+
+/** 告知电脑演示遥控页面是否处于活动状态；重连后会自动同步。 */
+void watch_host_link_set_presentation_active(bool active);
+
+/** 将一次翻页操作放入网络任务队列；断线时立即拒绝，不会留到重连后发送。 */
+esp_err_t watch_host_link_send_presentation_action(bool next_page, uint32_t *op_id);
+
+/** 复制电脑端演示开关及最近一次操作结果，供 LVGL 任务轮询显示。 */
+void watch_host_link_get_presentation_snapshot(watch_presentation_snapshot_t *snapshot);
 
 #ifdef __cplusplus
 }

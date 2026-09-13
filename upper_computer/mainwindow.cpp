@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -16,6 +17,7 @@
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSerialPort>
 #include <QSerialPortInfo>
 #include <QSettings>
@@ -27,9 +29,81 @@
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <cstdlib>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cwchar>
+#endif
+
 namespace {
 constexpr int kProtocolVersion = 1;
 constexpr int kMaximumLine = 4096;
+constexpr int kPresentationResultCache = 64;
+
+bool sendPresentationKey(bool nextPage, QString *reason)
+{
+#ifdef Q_OS_WIN
+    HWND window = GetForegroundWindow();
+    if(window == nullptr) {
+        if(reason) *reason = "foreground_not_slideshow";
+        return false;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    wchar_t path[1024] = {};
+    DWORD pathSize = DWORD(sizeof(path) / sizeof(path[0]));
+    bool supportedProcess = false;
+    if(process != nullptr) {
+        if(QueryFullProcessImageNameW(process, 0, path, &pathSize)) {
+            const wchar_t *name = std::wcsrchr(path, L'\\');
+            name = name != nullptr ? name + 1 : path;
+            supportedProcess = _wcsicmp(name, L"wps.exe") == 0 ||
+                               _wcsicmp(name, L"wpp.exe") == 0 ||
+                               _wcsicmp(name, L"powerpnt.exe") == 0;
+        }
+        CloseHandle(process);
+    }
+
+    RECT windowRect = {};
+    MONITORINFO monitorInfo = {};
+    monitorInfo.cbSize = sizeof(MONITORINFO);
+    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    bool fullScreen = GetWindowRect(window, &windowRect) &&
+                      GetMonitorInfoW(monitor, &monitorInfo) &&
+                      std::abs(windowRect.left - monitorInfo.rcMonitor.left) <= 16 &&
+                      std::abs(windowRect.top - monitorInfo.rcMonitor.top) <= 16 &&
+                      std::abs(windowRect.right - monitorInfo.rcMonitor.right) <= 16 &&
+                      std::abs(windowRect.bottom - monitorInfo.rcMonitor.bottom) <= 16;
+
+    if(!supportedProcess || !fullScreen) {
+        if(reason) *reason = "foreground_not_slideshow";
+        return false;
+    }
+
+    const WORD virtualKey = nextPage ? VK_NEXT : VK_PRIOR;
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = virtualKey;
+    inputs[1] = inputs[0];
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    if(SendInput(2, inputs, sizeof(INPUT)) != 2) {
+        if(reason) *reason = "send_input_failed";
+        return false;
+    }
+    if(reason) *reason = nextPage ? "next" : "previous";
+    return true;
+#else
+    Q_UNUSED(nextPage);
+    if(reason) *reason = "unsupported_platform";
+    return false;
+#endif
+}
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -39,7 +113,7 @@ MainWindow::MainWindow(QWidget *parent)
       m_heartbeatTimer(new QTimer(this))
 {
     buildUi();
-    setWindowTitle("ESP-WATCH 上位机 - 阶段 6");
+    setWindowTitle("ESP-WATCH 上位机 - 阶段 8");
     resize(960, 720);
 
     connect(m_serial, &QSerialPort::readyRead, this, &MainWindow::consumeSerialData);
@@ -57,6 +131,7 @@ MainWindow::MainWindow(QWidget *parent)
     refreshSerialPorts();
     setSerialControlsEnabled(false);
     setWirelessStatus("服务未启动", "#777777");
+    updatePresentationAvailability();
     m_addressHint->setText(localIpv4Text());
     appendLog("程序已启动。先开启电脑热点，再通过 USB 写入热点和无线服务配置。");
 }
@@ -75,8 +150,41 @@ void MainWindow::buildUi()
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildConnectionPage(), "设备连接");
     tabs->addTab(buildPlaceholderPage("专注任务", "阶段 7 将在此实现电脑主导的任务与计时状态。"), "专注任务");
-    tabs->addTab(buildPlaceholderPage("演示遥控", "阶段 8、9 将在此实现拨轮与手势翻页。"), "演示遥控");
+    tabs->addTab(buildPresentationPage(), "演示遥控");
     setCentralWidget(tabs);
+}
+
+QWidget *MainWindow::buildPresentationPage()
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    auto *heading = new QLabel("WPS 演示遥控");
+    heading->setStyleSheet("font-size:24px;font-weight:600;");
+    m_presentationConnection = new QLabel("手表连接：离线");
+    m_presentationWatchPage = new QLabel("手表页面：未进入演示遥控");
+    m_presentationEnabled = new QCheckBox("启用演示控制");
+    m_presentationEnabled->setEnabled(false);
+    m_presentationRecent = new QLabel("最近指令：无");
+    m_presentationRecent->setWordWrap(true);
+    auto *help = new QLabel(
+        "开启此开关后，请切回 WPS 全屏放映窗口并让它保持在前台。手表上拨上一页、下拨下一页。"
+        "电脑只确认模拟按键已执行，不读取或推算当前页码；断线指令不会补发。");
+    help->setWordWrap(true);
+    help->setStyleSheet("color:#666666;");
+
+    layout->addWidget(heading);
+    layout->addSpacing(16);
+    layout->addWidget(m_presentationConnection);
+    layout->addWidget(m_presentationWatchPage);
+    layout->addWidget(m_presentationEnabled);
+    layout->addSpacing(12);
+    layout->addWidget(m_presentationRecent);
+    layout->addWidget(help);
+    layout->addStretch();
+
+    connect(m_presentationEnabled, &QCheckBox::toggled, this,
+            [this](bool enabled) { setPresentationEnabled(enabled); });
+    return page;
 }
 
 QWidget *MainWindow::buildConnectionPage()
@@ -433,6 +541,11 @@ void MainWindow::handleClientMessage(const QJsonObject &object)
             return;
         }
         m_authenticated = true;
+        m_watchPresentationActive = false;
+        m_presentationResults.clear();
+        m_presentationResultOrder.clear();
+        setPresentationEnabled(false, false);
+        updatePresentationAvailability();
         m_connectedDevice->setText(QString("当前设备：%1（%2）")
                                    .arg(object.value("device_name").toString(), deviceId));
         setWirelessStatus("手表已连接", "#16833a");
@@ -449,6 +562,18 @@ void MainWindow::handleClientMessage(const QJsonObject &object)
                         {"seq", object.value("seq")}, {"session", m_sessionId}});
     } else if(type == "pong") {
         // 收到即由 m_lastClientRx 更新存活时间。
+    } else if(type == "presentation_state") {
+        if(object.value("session").toString() != m_sessionId ||
+           !object.value("active").isBool()) {
+            appendLog("演示页面状态的会话或字段无效。");
+            return;
+        }
+        m_watchPresentationActive = object.value("active").toBool();
+        updatePresentationAvailability();
+        appendLog(m_watchPresentationActive ? "手表已进入演示遥控页面。" :
+                                              "手表已退出演示遥控页面。");
+    } else if(type == "presentation_control") {
+        handlePresentationControl(object);
     } else {
         appendLog("收到尚未在阶段 6 启用的消息：" + type);
     }
@@ -483,9 +608,95 @@ void MainWindow::disconnectClient()
         m_client = nullptr;
     }
     m_authenticated = false;
+    m_watchPresentationActive = false;
+    setPresentationEnabled(false, false);
+    m_presentationResults.clear();
+    m_presentationResultOrder.clear();
+    updatePresentationAvailability();
     m_clientBuffer.clear();
     m_connectedDevice->setText("当前设备：无");
     if(m_server->isListening()) setWirelessStatus("服务已启动，等待手表", "#d28b00");
+}
+
+void MainWindow::setPresentationEnabled(bool enabled, bool notifyWatch)
+{
+    if(enabled && !m_authenticated) enabled = false;
+    if(m_presentationEnabled && m_presentationEnabled->isChecked() != enabled) {
+        const QSignalBlocker blocker(m_presentationEnabled);
+        m_presentationEnabled->setChecked(enabled);
+    }
+    if(notifyWatch && m_authenticated) {
+        sendClientJson({{"v", kProtocolVersion}, {"type", "presentation_status"},
+                        {"session", m_sessionId}, {"enabled", enabled}});
+    }
+    appendLog(enabled ? "演示控制已开启。" : "演示控制已暂停。");
+    if(m_presentationRecent && !enabled) {
+        m_presentationRecent->setText("最近指令：演示控制已暂停");
+    }
+}
+
+void MainWindow::updatePresentationAvailability()
+{
+    if(!m_presentationEnabled) return;
+    m_presentationEnabled->setEnabled(m_authenticated);
+    m_presentationConnection->setText(m_authenticated ? "手表连接：在线" : "手表连接：离线");
+    m_presentationConnection->setStyleSheet(m_authenticated ? "color:#16833a;" : "color:#777777;");
+    m_presentationWatchPage->setText(m_watchPresentationActive ?
+        "手表页面：演示遥控已打开" : "手表页面：未进入演示遥控");
+}
+
+void MainWindow::handlePresentationControl(const QJsonObject &object)
+{
+    const QString requestSession = object.value("session").toString();
+    const double rawOpId = object.value("op_id").toDouble(-1);
+    const QString action = object.value("action").toString();
+    if(requestSession != m_sessionId || rawOpId < 1 || rawOpId > 4294967295.0 ||
+       (action != "next" && action != "previous")) {
+        appendLog("忽略字段无效的演示控制请求。");
+        return;
+    }
+
+    const quint32 opId = quint32(rawOpId);
+    if(m_presentationResults.contains(opId)) {
+        sendClientJson(m_presentationResults.value(opId));
+        appendLog(QString("演示指令 #%1 重复，返回首次结果但不再次翻页。").arg(opId));
+        return;
+    }
+
+    QString reason;
+    bool processed = false;
+    if(!m_presentationEnabled->isChecked()) {
+        reason = "disabled";
+    } else if(!m_watchPresentationActive) {
+        reason = "watch_inactive";
+    } else {
+        processed = sendPresentationKey(action == "next", &reason);
+    }
+
+    QJsonObject result{{"v", kProtocolVersion}, {"type", "presentation_result"},
+                       {"session", m_sessionId}, {"op_id", int(opId)},
+                       {"outcome", processed ? "processed" : "rejected"},
+                       {"reason", reason}};
+    m_presentationResults.insert(opId, result);
+    m_presentationResultOrder.append(opId);
+    if(m_presentationResultOrder.size() > kPresentationResultCache) {
+        m_presentationResults.remove(m_presentationResultOrder.takeFirst());
+    }
+    sendClientJson(result);
+
+    if(processed) {
+        const QString direction = action == "next" ? "下一页" : "上一页";
+        m_presentationRecent->setText(QString("最近指令：%1（电脑已发送按键）").arg(direction));
+        appendLog(QString("演示指令 #%1：已向 WPS/PowerPoint 发送%2按键。")
+                  .arg(opId).arg(direction));
+    } else {
+        const QString displayReason = reason == "disabled" ? "电脑端开关未开启" :
+            reason == "watch_inactive" ? "手表未处于演示遥控页面" :
+            reason == "foreground_not_slideshow" ? "前台不是 WPS/PowerPoint 全屏放映" :
+            "Windows 模拟按键失败";
+        m_presentationRecent->setText("最近指令：已拒绝（" + displayReason + "）");
+        appendLog(QString("演示指令 #%1 已拒绝：%2。").arg(opId).arg(displayReason));
+    }
 }
 
 void MainWindow::setWirelessStatus(const QString &text, const QString &color)

@@ -4,10 +4,13 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QJsonObject>
+#include <QHash>
+#include <QList>
 #include <QMainWindow>
 #include <QPointer>
 
 class QComboBox;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -27,6 +30,7 @@ public:
 private:
     void buildUi();
     QWidget *buildConnectionPage();
+    QWidget *buildPresentationPage();
     QWidget *buildPlaceholderPage(const QString &title, const QString &description);
 
     void refreshSerialPorts();
@@ -47,6 +51,9 @@ private:
     void sendClientJson(const QJsonObject &object);
     void heartbeatTick();
     void setWirelessStatus(const QString &text, const QString &color);
+    void setPresentationEnabled(bool enabled, bool notifyWatch = true);
+    void updatePresentationAvailability();
+    void handlePresentationControl(const QJsonObject &object);
     void appendLog(const QString &text);
     QString localIpv4Text() const;
     QString createPairToken() const;
@@ -86,6 +93,14 @@ private:
     QLabel *m_addressHint;
     QLabel *m_connectedDevice;
     QPlainTextEdit *m_log;
+
+    QCheckBox *m_presentationEnabled;
+    QLabel *m_presentationConnection;
+    QLabel *m_presentationWatchPage;
+    QLabel *m_presentationRecent;
+    bool m_watchPresentationActive = false;
+    QHash<quint32, QJsonObject> m_presentationResults;
+    QList<quint32> m_presentationResultOrder;
 };
 
 #endif
