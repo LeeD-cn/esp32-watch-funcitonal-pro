@@ -19,6 +19,8 @@
 #include "watch_rtc.h"
 #include "watch_battery.h"
 #include "watch_bmi270.h"
+#include "watch_imu_capture.h"
+#include "watch_gesture.h"
 #include "watch_config.h"
 #include "watch_serial_config.h"
 #include "watch_host_link.h"
@@ -254,6 +256,8 @@ static void watch_display_set_on(bool on)
  */
 static void watch_power_off(void)
 {
+    watch_gesture_stop();
+    watch_imu_capture_suspend(true);
     watch_display_set_on(false);
     power_hold_force_off();
 
@@ -391,6 +395,8 @@ static void watch_enter_light_sleep_until_key4(void)
         return;
     }
 
+    watch_gesture_stop();
+    watch_imu_capture_suspend(true);
     s_watch_sleeping = true;
 
     power_hold_keep_on();
@@ -425,6 +431,7 @@ static void watch_enter_light_sleep_until_key4(void)
         vTaskDelay(pdMS_TO_TICKS(30));
         watch_display_set_on(true);
         s_watch_sleeping = false;
+        watch_imu_capture_suspend(false);
     }
 }
 
@@ -459,7 +466,7 @@ static bool watch_handle_global_key(watch_key_t key)
 static bool watch_auto_off_check(TickType_t *last_key1_to_key3_tick)
 {
     if(last_key1_to_key3_tick == NULL || !watch_settings_auto_off_enabled() ||
-       watch_ui_should_keep_awake()) {
+       watch_ui_should_keep_awake() || watch_imu_capture_active()) {
         return false;
     }
 

@@ -7,7 +7,7 @@
  *  * 模块职责：
  * - 负责 BMI270 加速度计初始化、配置文件加载、数据读取、中断映射和抬腕检测。
  * - BMI270 上电后必须加载 Bosch 配置文件，否则内部状态不会进入可用状态。
- * - 为了省电，本模块只打开加速度计，陀螺仪保持关闭。
+ * - 默认只开加速度计以省电；独立六轴采集临时开启陀螺仪，结束后恢复。
  * - 抬腕检测基于息屏时的基线姿态、后续加速度变化、Z/Y 轴趋势和稳定性共同判断，减少误触发。
  *
  * 阅读建议：
@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "driver/i2c.h"
 #include "esp_log.h"
@@ -99,6 +100,9 @@ static const char *TAG = "watch_bmi270";
 static uint8_t s_bmi270_addr = BMI270_ADDR_HIGH;
 /* BMI270 是否已经初始化成功。 */
 static bool s_bmi270_ready = false;
+static atomic_bool s_motion_active;
+static uint8_t s_motion_saved[5];
+static const uint8_t s_motion_regs[] = {0x40, 0x41, 0x42, 0x43, 0x7D};
 /* 抬腕检测流程是否正在运行。 */
 static bool s_raise_active = false;
 
@@ -341,7 +345,7 @@ static esp_err_t bmi270_read_accel_mg(int16_t *x_mg, int16_t *y_mg, int16_t *z_m
         return ESP_ERR_INVALID_ARG;
     }
 
-    if(!s_bmi270_ready) {
+    if(!s_bmi270_ready || atomic_load(&s_motion_active)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -514,6 +518,69 @@ esp_err_t watch_bmi270_read_acceleration(watch_bmi270_accel_sample_t *sample)
     sample->timestamp_us = esp_timer_get_time();
     sample->valid = ret == ESP_OK;
     return ret;
+}
+
+esp_err_t watch_bmi270_motion_end(void)
+{
+    if(!atomic_load(&s_motion_active)) return ESP_OK;
+    esp_err_t result = ESP_OK;
+    for(size_t i = 0; i < sizeof(s_motion_regs); ++i) {
+        esp_err_t err = bmi270_write_u8(s_motion_regs[i], s_motion_saved[i]);
+        if(err != ESP_OK) result = err;
+    }
+    /* Do not let normal users treat a failed restore as a valid sensor. */
+    if(result != ESP_OK) s_bmi270_ready = false;
+    atomic_store(&s_motion_active, false);
+    return result;
+}
+
+esp_err_t watch_bmi270_motion_begin(void)
+{
+    if(!s_bmi270_ready || s_raise_active || atomic_load(&s_motion_active))
+        return ESP_ERR_INVALID_STATE;
+    for(size_t i = 0; i < sizeof(s_motion_regs); ++i) {
+        esp_err_t err = bmi270_read(s_motion_regs[i], &s_motion_saved[i], 1);
+        if(err != ESP_OK) return err;
+    }
+    atomic_store(&s_motion_active, true);
+    /* Bosch BMI270: 100 Hz, normal filtering, performance mode;
+     * accelerometer ±4g (8192 LSB/g), gyro ±1000 dps (32.768 LSB/dps).
+     * Preserve other power bits; startup samples are discarded by collector. */
+    uint8_t values[] = {0xA8, 0x01, 0xE8, 0x01, s_motion_saved[4] | 0x06};
+    for(size_t i = 0; i < sizeof(s_motion_regs); ++i) {
+        esp_err_t err = bmi270_write_u8(s_motion_regs[i], values[i]);
+        uint8_t actual = 0;
+        if(err == ESP_OK) err = bmi270_read(s_motion_regs[i], &actual, 1);
+        if(err == ESP_OK && actual != values[i]) err = ESP_FAIL;
+        if(err != ESP_OK) {
+            (void)watch_bmi270_motion_end();
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t watch_bmi270_motion_read(watch_bmi270_motion_sample_t *sample)
+{
+    if(sample == NULL) return ESP_ERR_INVALID_ARG;
+    memset(sample, 0, sizeof(*sample));
+    if(!atomic_load(&s_motion_active)) return ESP_ERR_INVALID_STATE;
+    uint8_t status;
+    esp_err_t err = bmi270_read(0x03, &status, 1);
+    if(err != ESP_OK) return err;
+    /* Both fresh flags must be set. Never export a repeated register read. */
+    if((status & 0xC0) != 0xC0) return ESP_ERR_NOT_FOUND;
+    uint8_t raw[15];
+    int64_t before = esp_timer_get_time();
+    err = bmi270_read(BMI270_REG_DATA_8, raw, sizeof(raw));
+    sample->timestamp_us = (before + esp_timer_get_time()) / 2;
+    if(err != ESP_OK) return err;
+    for(int i = 0; i < 3; ++i) {
+        sample->accel[i] = i16_from_le(raw + 2 * i);
+        sample->gyro[i] = i16_from_le(raw + 6 + 2 * i);
+    }
+    sample->sensor_ticks = raw[12] | ((uint32_t)raw[13] << 8) | ((uint32_t)raw[14] << 16);
+    return ESP_OK;
 }
 
 /**

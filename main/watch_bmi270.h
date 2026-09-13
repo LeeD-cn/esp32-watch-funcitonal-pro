@@ -52,6 +52,18 @@ typedef struct {
  */
 esp_err_t watch_bmi270_read_acceleration(watch_bmi270_accel_sample_t *sample);
 
+/* Diagnostic six-axis mode: raw native axes, ±4g and ±1000 degrees/s.
+ * One caller owns begin/read/end; normal readers are suspended during this mode. */
+typedef struct {
+    int64_t timestamp_us;
+    int16_t accel[3];
+    int16_t gyro[3];
+    uint32_t sensor_ticks; /* 24-bit free-running clock, NOT sample timestamp. */
+} watch_bmi270_motion_sample_t;
+esp_err_t watch_bmi270_motion_begin(void);
+esp_err_t watch_bmi270_motion_read(watch_bmi270_motion_sample_t *sample);
+esp_err_t watch_bmi270_motion_end(void);
+
 /**
  * @brief 进入抬腕检测状态并建立息屏姿态基线。
  */

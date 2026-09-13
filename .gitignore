@@ -11,6 +11,7 @@
 
 # Device Flash backups (may contain personal configuration)
 /backups/
+/captures/
 
 # Previous generated SDK configuration; keep sdkconfig and dependencies.lock
 /sdkconfig.old

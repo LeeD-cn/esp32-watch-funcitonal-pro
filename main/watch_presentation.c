@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "watch_gesture.h"
 #include "watch_host_link.h"
 
 #define PRESENTATION_REFRESH_MS 100
@@ -24,6 +25,7 @@ typedef struct {
     lv_obj_t *feedback;
     lv_timer_t *timer;
     uint32_t last_revision;
+    uint32_t last_gesture_revision;
     watch_host_link_state_t last_link_state;
     bool wants_back;
     bool key2_long_handled;
@@ -80,9 +82,24 @@ static void refresh_ui(lv_timer_t *timer)
     (void)timer;
     if(s_presentation.page == NULL) return;
 
+    watch_gesture_event_t event;
+    while(watch_gesture_pop_event(&event)) {
+        uint32_t op_id;
+        esp_err_t err = watch_host_link_send_presentation_action(
+            event == WATCH_GESTURE_RIGHT, &op_id);
+        if(err != ESP_OK) {
+            lv_label_set_text(s_presentation.feedback,
+                              watch_host_link_get_state() == WATCH_HOST_LINK_ONLINE ?
+                              "发送队列忙 请稍后重试" : "电脑未连接 指令已丢弃");
+        }
+        (void)op_id;
+    }
+
     watch_host_link_state_t state = watch_host_link_get_state();
     watch_presentation_snapshot_t snapshot;
     watch_host_link_get_presentation_snapshot(&snapshot);
+    watch_gesture_snapshot_t gesture;
+    watch_gesture_get_snapshot(&gesture);
 
     if(state != s_presentation.last_link_state) {
         lv_label_set_text(s_presentation.connection, connection_text(state));
@@ -101,6 +118,18 @@ static void refresh_ui(lv_timer_t *timer)
         lv_label_set_text(s_presentation.feedback, feedback_text(&snapshot));
         s_presentation.last_revision = snapshot.revision;
     }
+    if(gesture.revision != s_presentation.last_gesture_revision) {
+        const char *text = "手势识别  暂未启用";
+        lv_color_t color = lv_color_hex(0x8F99AA);
+        if(gesture.enabled) {
+            text = gesture.ready ? "手势识别  已开启" : "手势识别  等待";
+            color = gesture.ready ? lv_color_hex(0x66E08A) : lv_color_hex(0xFFB454);
+        }
+        lv_label_set_text(s_presentation.gesture, text);
+        lv_obj_set_style_text_color(s_presentation.gesture, color, 0);
+        if(gesture.error != ESP_OK) lv_label_set_text(s_presentation.feedback, "BMI270 error");
+        s_presentation.last_gesture_revision = gesture.revision;
+    }
 }
 
 lv_obj_t *watch_presentation_create(lv_obj_t *parent)
@@ -108,6 +137,7 @@ lv_obj_t *watch_presentation_create(lv_obj_t *parent)
     watch_presentation_destroy();
     memset(&s_presentation, 0, sizeof(s_presentation));
     s_presentation.last_link_state = (watch_host_link_state_t)-1;
+    s_presentation.last_gesture_revision = UINT32_MAX;
 
     lv_obj_t *page = lv_obj_create(parent);
     if(page == NULL) return NULL;
@@ -155,6 +185,7 @@ lv_obj_t *watch_presentation_create(lv_obj_t *parent)
 
 void watch_presentation_reset(void)
 {
+    watch_gesture_stop();
     s_presentation.wants_back = false;
     s_presentation.key2_long_handled = false;
     watch_host_link_set_presentation_active(true);
@@ -194,10 +225,14 @@ void watch_presentation_on_key(watch_key_t key)
     if(key == WATCH_KEY_2_LONG) {
         s_presentation.key2_long_handled = true;
         s_presentation.wants_back = true;
+        watch_gesture_stop();
         watch_host_link_set_presentation_active(false);
     } else if(key == WATCH_KEY_2_RELEASE) {
         if(!s_presentation.key2_long_handled) {
-            lv_label_set_text(s_presentation.feedback, "手势将在阶段9启用");
+            watch_gesture_snapshot_t gesture;
+            watch_gesture_get_snapshot(&gesture);
+            esp_err_t err = watch_gesture_set_enabled(!gesture.enabled);
+            if(err != ESP_OK) lv_label_set_text(s_presentation.feedback, "BMI270 error");
         }
         s_presentation.key2_long_handled = false;
     }
@@ -210,6 +245,7 @@ bool watch_presentation_wants_back(void)
 
 void watch_presentation_destroy(void)
 {
+    watch_gesture_stop();
     watch_host_link_set_presentation_active(false);
     if(s_presentation.timer != NULL) {
         lv_timer_delete(s_presentation.timer);

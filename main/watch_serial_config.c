@@ -37,6 +37,7 @@
 
 #include "watch_config.h"
 #include "watch_device_info.h"
+#include "watch_imu_capture.h"
 
 /* 大图采用 watch_config.c 的流式写入接口，避免占用大块连续 RAM。 */
 extern esp_err_t watch_config_image_stream_begin(const char *name, int w, int h, size_t size);
@@ -108,6 +109,21 @@ static int serial_read_char(int timeout_ms)
         vTaskDelay(pdMS_TO_TICKS(timeout_ms));
     }
     return ch;
+}
+
+/* Bounded diagnostic export: unplugging USB must not block power-key handling
+ * for one timeout per sample. A short write aborts the complete export. */
+static bool serial_write_capture_line(const char *text)
+{
+#if CONFIG_IDF_TARGET_ESP32S3
+    if(s_use_usb_serial_jtag) {
+        char line[256];
+        int len = snprintf(line, sizeof(line), "%s\n", text);
+        if(len < 0 || len >= (int)sizeof(line)) return false;
+        return usb_serial_jtag_write_bytes(line, len, pdMS_TO_TICKS(100)) == len;
+    }
+#endif
+    return false; /* Capture requires native USB; leave legacy config fallback alone. */
 }
 
 static void serial_write_line(const char *text)
@@ -700,7 +716,18 @@ static void handle_command(cJSON *root)
 
     const char *cmd = cmd_obj->valuestring;
 
-    if(strcmp(cmd, "set_config") == 0) {
+    if(strcmp(cmd, "imu_capture") == 0) {
+        cJSON *seconds = cJSON_GetObjectItem(root, "seconds");
+        cJSON *delay = cJSON_GetObjectItem(root, "delay_ms");
+        if(s_img_rx.active || !cJSON_IsNumber(seconds) || !cJSON_IsNumber(delay) ||
+           seconds->valuedouble < 1 || seconds->valuedouble > 15 ||
+           delay->valuedouble < 0 || delay->valuedouble > 10000 ||
+           seconds->valuedouble != seconds->valueint || delay->valuedouble != delay->valueint) {
+            serial_write_line("{\"imu\":\"error\",\"reason\":\"invalid_request_or_image_busy\"}");
+        } else {
+            watch_imu_capture_run((unsigned)seconds->valueint, (unsigned)delay->valueint, serial_write_capture_line);
+        }
+    } else if(strcmp(cmd, "set_config") == 0) {
         handle_set_config(root);
     } else if(strcmp(cmd, "get_config") == 0) {
         handle_get_config();
