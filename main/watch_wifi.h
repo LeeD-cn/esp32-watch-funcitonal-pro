@@ -50,7 +50,13 @@ esp_err_t watch_wifi_wait_connected(TickType_t timeout_ticks);
  * @return ESP_OK 停止成功或本来未启动。
  */
 esp_err_t watch_wifi_stop(void);
-bool watch_wifi_is_connected(void);
+
+/**
+ * @brief 设置系统级网络暂停状态。
+ *
+ * 息屏时设为 true，阻止校时、天气和上位机任务重新启动 Wi-Fi；唤醒后设为 false。
+ */
+void watch_wifi_set_suspended(bool suspended);
 
 #ifdef __cplusplus
 }

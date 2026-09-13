@@ -2,6 +2,10 @@
 /build/
 /build-*/
 /cmake-build-*/
+/upper_computer/build/
+/upper_computer/build-*/
+/upper_computer/CMakeUserPresets.json
+/upper_computer/.qtcreator/
 /managed_components/
 /compile_commands.json
 

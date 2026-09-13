@@ -18,6 +18,7 @@ idf_component_register(
         "watch_config.c"
         "watch_device_info.c"
         "watch_serial_config.c"
+        "watch_host_link.c"
         "watch_e_card.c"
         "watch_weather.c"
         "watch_compass.c"

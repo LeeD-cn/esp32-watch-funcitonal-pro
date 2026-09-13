@@ -46,6 +46,8 @@ static esp_netif_t *s_wifi_netif;
 static bool s_inited;
 /* started 表示当前允许 Wi-Fi 连接/重连；stop 后事件回调不会再自动重连。 */
 static bool s_started;
+/* 系统息屏期间禁止任何后台任务重新启动 Wi-Fi。 */
+static volatile bool s_suspended;
 /* 当前断线后的重试次数，超过 WIFI_MAX_RETRY 后置失败位。 */
 static int s_retry_num;
 static TaskHandle_t s_reconnect_task;
@@ -266,6 +268,10 @@ esp_err_t watch_wifi_start(void)
 {
     /* 根据 NVS 配置设置 STA 参数并启动 Wi-Fi。启动后由事件和重连任务负责实际连接。
      */
+    if(s_suspended) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ESP_RETURN_ON_ERROR(watch_wifi_init(), TAG, "watch_wifi_init failed");
 
     if(s_wifi_event_group != NULL) {
@@ -339,6 +345,14 @@ esp_err_t watch_wifi_stop(void)
 
     ESP_LOGW(TAG, "esp_wifi_stop failed: %s", esp_err_to_name(ret));
     return ret;
+}
+
+void watch_wifi_set_suspended(bool suspended)
+{
+    s_suspended = suspended;
+    if(suspended) {
+        (void)watch_wifi_stop();
+    }
 }
 
 /**

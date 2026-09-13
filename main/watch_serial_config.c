@@ -361,6 +361,17 @@ static bool handle_set_config(cJSON *root)
     if(!json_get_string_if_present(root, "sessdata", cfg.sessdata, sizeof(cfg.sessdata), WATCH_CONFIG_SESSDATA_MAX)) return false;
     if(!json_get_string_if_present(root, "latitude", cfg.latitude, sizeof(cfg.latitude), WATCH_CONFIG_COORD_MAX)) return false;
     if(!json_get_string_if_present(root, "longitude", cfg.longitude, sizeof(cfg.longitude), WATCH_CONFIG_COORD_MAX)) return false;
+    if(!json_get_string_if_present(root, "host_addr", cfg.host_addr, sizeof(cfg.host_addr), WATCH_CONFIG_HOST_ADDR_MAX)) return false;
+    if(!json_get_string_if_present(root, "pair_token", cfg.pair_token, sizeof(cfg.pair_token), WATCH_CONFIG_PAIR_TOKEN_MAX)) return false;
+    cJSON *host_port = cJSON_GetObjectItem(root, "host_port");
+    if(host_port != NULL) {
+        if(!cJSON_IsNumber(host_port) || host_port->valuedouble < 1 || host_port->valuedouble > 65535 ||
+           host_port->valuedouble != (double)host_port->valueint) {
+            reply_simple(false, "invalid host_port");
+            return false;
+        }
+        cfg.host_port = (uint16_t)host_port->valueint;
+    }
     if(!json_get_ascii_string_if_present(root, "owner", device_info.owner, sizeof(device_info.owner), WATCH_DEVICE_OWNER_MAX)) return false;
     if(!json_get_ascii_string_if_present(root, "device_name", device_info.device_name, sizeof(device_info.device_name), WATCH_DEVICE_NAME_MAX)) return false;
 
@@ -418,11 +429,14 @@ static void handle_get_config(void)
     cJSON_AddStringToObject(root, "bili_uid", cfg.bili_uid);
     cJSON_AddStringToObject(root, "latitude", cfg.latitude);
     cJSON_AddStringToObject(root, "longitude", cfg.longitude);
+    cJSON_AddStringToObject(root, "host_addr", cfg.host_addr);
+    cJSON_AddNumberToObject(root, "host_port", cfg.host_port);
     cJSON_AddStringToObject(root, "owner", device_info.owner);
     cJSON_AddStringToObject(root, "device_name", device_info.device_name);
     cJSON_AddStringToObject(root, "device_id", device_info.device_id);
     cJSON_AddBoolToObject(root, "has_wifi_pass", cfg.wifi_pass[0] != '\0');
     cJSON_AddBoolToObject(root, "has_sessdata", cfg.sessdata[0] != '\0');
+    cJSON_AddBoolToObject(root, "has_pair_token", cfg.pair_token[0] != '\0');
     cJSON_AddBoolToObject(root, "has_qr_code", watch_config_image_exists("qr_code"));
     cJSON_AddBoolToObject(root, "has_cover", watch_config_image_exists("cover"));
 

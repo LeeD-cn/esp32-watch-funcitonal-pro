@@ -35,6 +35,9 @@
 #define WATCH_CONFIG_KEY_SESSDATA   "sessdata"
 #define WATCH_CONFIG_KEY_LATITUDE   "latitude"
 #define WATCH_CONFIG_KEY_LONGITUDE  "longitude"
+#define WATCH_CONFIG_KEY_HOST_ADDR  "host_addr"
+#define WATCH_CONFIG_KEY_HOST_PORT  "host_port"
+#define WATCH_CONFIG_KEY_PAIR_TOKEN "pair_token"
 #define WATCH_CONFIG_KEY_QR_IMG     "qr_img"
 #define WATCH_CONFIG_KEY_COVER_IMG  "cover_img"
 
@@ -699,6 +702,7 @@ esp_err_t watch_config_load(watch_config_t *cfg)
     }
 
     memset(cfg, 0, sizeof(*cfg));
+    cfg->host_port = WATCH_CONFIG_HOST_PORT_DEFAULT;
 
     esp_err_t ret = watch_config_init();
     if(ret != ESP_OK) {
@@ -720,6 +724,12 @@ esp_err_t watch_config_load(watch_config_t *cfg)
     nvs_get_str_safe(nvs, WATCH_CONFIG_KEY_SESSDATA, cfg->sessdata, sizeof(cfg->sessdata));
     nvs_get_str_safe(nvs, WATCH_CONFIG_KEY_LATITUDE, cfg->latitude, sizeof(cfg->latitude));
     nvs_get_str_safe(nvs, WATCH_CONFIG_KEY_LONGITUDE, cfg->longitude, sizeof(cfg->longitude));
+    nvs_get_str_safe(nvs, WATCH_CONFIG_KEY_HOST_ADDR, cfg->host_addr, sizeof(cfg->host_addr));
+    nvs_get_str_safe(nvs, WATCH_CONFIG_KEY_PAIR_TOKEN, cfg->pair_token, sizeof(cfg->pair_token));
+    uint16_t host_port = WATCH_CONFIG_HOST_PORT_DEFAULT;
+    if(nvs_get_u16(nvs, WATCH_CONFIG_KEY_HOST_PORT, &host_port) == ESP_OK && host_port != 0) {
+        cfg->host_port = host_port;
+    }
 
     nvs_close(nvs);
     return ESP_OK;
@@ -758,10 +768,20 @@ esp_err_t watch_config_save(const watch_config_t *cfg)
     if(ret == ESP_OK) ret = nvs_set_str(nvs, WATCH_CONFIG_KEY_SESSDATA, cfg->sessdata);
     if(ret == ESP_OK) ret = nvs_set_str(nvs, WATCH_CONFIG_KEY_LATITUDE, cfg->latitude);
     if(ret == ESP_OK) ret = nvs_set_str(nvs, WATCH_CONFIG_KEY_LONGITUDE, cfg->longitude);
+    if(ret == ESP_OK) ret = nvs_set_str(nvs, WATCH_CONFIG_KEY_HOST_ADDR, cfg->host_addr);
+    if(ret == ESP_OK) ret = nvs_set_u16(nvs, WATCH_CONFIG_KEY_HOST_PORT,
+                                        cfg->host_port == 0 ? WATCH_CONFIG_HOST_PORT_DEFAULT : cfg->host_port);
+    if(ret == ESP_OK) ret = nvs_set_str(nvs, WATCH_CONFIG_KEY_PAIR_TOKEN, cfg->pair_token);
     if(ret == ESP_OK) ret = nvs_commit(nvs);
 
     nvs_close(nvs);
     return ret;
+}
+
+bool watch_config_has_host(const watch_config_t *cfg)
+{
+    return cfg != NULL && cfg->host_addr[0] != '\0' &&
+           cfg->host_port != 0 && cfg->pair_token[0] != '\0';
 }
 
 /**

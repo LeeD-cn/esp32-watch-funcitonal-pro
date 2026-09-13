@@ -21,6 +21,9 @@ extern "C" {
 #define WATCH_CONFIG_BILI_UID_MAX       32
 #define WATCH_CONFIG_SESSDATA_MAX       1024
 #define WATCH_CONFIG_COORD_MAX          32
+#define WATCH_CONFIG_HOST_ADDR_MAX      64
+#define WATCH_CONFIG_PAIR_TOKEN_MAX     49
+#define WATCH_CONFIG_HOST_PORT_DEFAULT  8765
 
 #define WATCH_CONFIG_QR_W               74
 #define WATCH_CONFIG_QR_H               74
@@ -39,6 +42,9 @@ typedef struct {
     char sessdata[WATCH_CONFIG_SESSDATA_MAX];
     char latitude[WATCH_CONFIG_COORD_MAX];
     char longitude[WATCH_CONFIG_COORD_MAX];
+    char host_addr[WATCH_CONFIG_HOST_ADDR_MAX];
+    uint16_t host_port;
+    char pair_token[WATCH_CONFIG_PAIR_TOKEN_MAX];
 } watch_config_t;
 
 /**
@@ -89,6 +95,8 @@ bool watch_config_has_bili(const watch_config_t *cfg);
  * @return true 经纬度均非空；false 配置不完整。
  */
 bool watch_config_has_weather(const watch_config_t *cfg);
+/** 是否具备连接电脑端服务所需的地址、端口和配对令牌。 */
+bool watch_config_has_host(const watch_config_t *cfg);
 
 /**
  * @brief 保存一张 RGB565 图片到 Flash 图片槽。

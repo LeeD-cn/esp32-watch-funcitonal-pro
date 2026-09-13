@@ -21,6 +21,8 @@
 #include "watch_bmi270.h"
 #include "watch_config.h"
 #include "watch_serial_config.h"
+#include "watch_host_link.h"
+#include "watch_wifi.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_sleep.h"
@@ -45,7 +47,6 @@ extern bool watch_settings_auto_off_enabled(void);
 extern esp_err_t watch_bmi270_enable_data_ready_interrupt(bool enable);
 extern void watch_keys_key4_scan_suspend(void);
 extern void watch_keys_key4_scan_resume(void);
-extern esp_err_t watch_wifi_stop(void);
 extern void lcd_panel_sleep(bool sleep);
 
 /* LCD 面板句柄。 */
@@ -394,8 +395,8 @@ static void watch_enter_light_sleep_until_key4(void)
 
     power_hold_keep_on();
 
-    /* 息屏期间停止 Wi-Fi 以降低功耗。 */
-    (void)watch_wifi_stop();
+    /* 息屏期间停止 Wi-Fi，并阻止后台任务把它重新启动。 */
+    watch_wifi_set_suspended(true);
 
     watch_display_set_on(false);
     watch_keys_clear_events();
@@ -417,6 +418,7 @@ static void watch_enter_light_sleep_until_key4(void)
         watch_keys_clear_events();
         watch_keys_key4_scan_resume();
         watch_bmi270_raise_wrist_end();
+        watch_wifi_set_suspended(false);
         s_lvgl_tick_reset_needed = true;
 
         /* 等待外设时钟稳定后再唤醒并刷新显示。 */
@@ -560,7 +562,10 @@ void app_main(void)
     (void)watch_battery_init();
     (void)watch_bmi270_init();
 
+    /* 在后台校时和上位机连接任务启动前串行初始化一次 Wi-Fi，避免两个任务并发创建网络资源。 */
+    (void)watch_wifi_init();
     watch_time_sync_start();
+    ESP_ERROR_CHECK(watch_host_link_start());
     ESP_ERROR_CHECK(watch_keys_init());
 
     BaseType_t ret = xTaskCreatePinnedToCore(watch_lvgl_task,
