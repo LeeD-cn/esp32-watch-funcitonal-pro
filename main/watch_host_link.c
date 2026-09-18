@@ -43,15 +43,20 @@
 #define HOST_LINK_IDLE_POLL_MS     250
 #define HOST_LINK_SESSION_MAX      40
 #define PRESENTATION_TTL_MS        1500
+#define FOCUS_TTL_MS               2000
 
 typedef enum {
     HOST_TX_PRESENTATION_STATE = 0,
     HOST_TX_PRESENTATION_ACTION,
+    HOST_TX_FOCUS_STATE,
+    HOST_TX_FOCUS_SYNC,
+    HOST_TX_FOCUS_ACTION,
 } host_tx_type_t;
 
 typedef struct {
     host_tx_type_t type;
     bool flag;
+    watch_focus_action_t focus_action;
     uint32_t op_id;
     TickType_t created_at;
 } host_tx_message_t;
@@ -61,9 +66,75 @@ static volatile watch_host_link_state_t s_state = WATCH_HOST_LINK_NOT_CONFIGURED
 static bool s_started;
 static QueueHandle_t s_tx_queue;
 static volatile bool s_presentation_page_active;
+static volatile bool s_focus_page_active;
 static uint32_t s_next_op_id = 1;
 static portMUX_TYPE s_presentation_lock = portMUX_INITIALIZER_UNLOCKED;
 static watch_presentation_snapshot_t s_presentation_snapshot;
+static portMUX_TYPE s_focus_lock = portMUX_INITIALIZER_UNLOCKED;
+static watch_focus_snapshot_t s_focus_snapshot;
+
+static void utf8_copy(char *dst, size_t capacity, const char *src)
+{
+    size_t out = 0;
+    if(capacity == 0) return;
+    if(src == NULL) src = "";
+    while(src[0] != '\0') {
+        unsigned char lead = (unsigned char)src[0];
+        size_t count = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 :
+                       (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+        if(out + count >= capacity) break;
+        bool valid = true;
+        for(size_t i = 1; i < count; ++i) {
+            if(src[i] == '\0' || ((unsigned char)src[i] & 0xC0) != 0x80) valid = false;
+        }
+        if(!valid) count = 1;
+        memcpy(dst + out, src, count);
+        out += count;
+        src += count;
+    }
+    dst[out] = '\0';
+}
+
+static watch_focus_state_t focus_state_from_text(const char *state)
+{
+    if(state == NULL) return WATCH_FOCUS_NONE;
+    if(strcmp(state, "ready") == 0) return WATCH_FOCUS_READY;
+    if(strcmp(state, "running") == 0) return WATCH_FOCUS_RUNNING;
+    if(strcmp(state, "paused") == 0) return WATCH_FOCUS_PAUSED;
+    if(strcmp(state, "completed") == 0) return WATCH_FOCUS_COMPLETED;
+    if(strcmp(state, "aborted") == 0) return WATCH_FOCUS_ABORTED;
+    return WATCH_FOCUS_NONE;
+}
+
+static void focus_snapshot_update(const cJSON *root)
+{
+    const cJSON *version = cJSON_GetObjectItem(root, "version");
+    const cJSON *state = cJSON_GetObjectItem(root, "state");
+    if(!cJSON_IsNumber(version) || !cJSON_IsString(state)) return;
+
+    portENTER_CRITICAL(&s_focus_lock);
+    uint32_t incoming = (uint32_t)version->valuedouble;
+    if(incoming >= s_focus_snapshot.version) {
+        const cJSON *value;
+        s_focus_snapshot.version = incoming;
+        s_focus_snapshot.state = focus_state_from_text(state->valuestring);
+        value = cJSON_GetObjectItem(root, "planned_sec");
+        s_focus_snapshot.planned_sec = cJSON_IsNumber(value) ? (uint32_t)value->valuedouble : 0;
+        value = cJSON_GetObjectItem(root, "focused_sec");
+        s_focus_snapshot.focused_sec = cJSON_IsNumber(value) ? (uint32_t)value->valuedouble : 0;
+        value = cJSON_GetObjectItem(root, "remaining_sec");
+        s_focus_snapshot.remaining_sec = cJSON_IsNumber(value) ? (uint32_t)value->valuedouble : 0;
+        value = cJSON_GetObjectItem(root, "task_id");
+        snprintf(s_focus_snapshot.task_id, sizeof(s_focus_snapshot.task_id), "%s",
+                 cJSON_IsString(value) ? value->valuestring : "");
+        value = cJSON_GetObjectItem(root, "project");
+        utf8_copy(s_focus_snapshot.project, sizeof(s_focus_snapshot.project),
+                  cJSON_IsString(value) ? value->valuestring : "");
+        s_focus_snapshot.received_tick = (uint32_t)xTaskGetTickCount();
+        s_focus_snapshot.revision++;
+    }
+    portEXIT_CRITICAL(&s_focus_lock);
+}
 
 static void presentation_snapshot_reset(const char *reason)
 {
@@ -146,6 +217,62 @@ void watch_host_link_set_presentation_active(bool active)
         .created_at = xTaskGetTickCount(),
     };
     (void)xQueueSend(s_tx_queue, &message, 0);
+}
+
+void watch_host_link_get_focus_snapshot(watch_focus_snapshot_t *snapshot)
+{
+    if(snapshot == NULL) return;
+    portENTER_CRITICAL(&s_focus_lock);
+    *snapshot = s_focus_snapshot;
+    portEXIT_CRITICAL(&s_focus_lock);
+}
+
+static esp_err_t queue_focus_message(host_tx_type_t type,
+                                     watch_focus_action_t action,
+                                     uint32_t *op_id)
+{
+    if(s_tx_queue == NULL || s_state != WATCH_HOST_LINK_ONLINE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    host_tx_message_t message = {
+        .type = type,
+        .focus_action = action,
+        .created_at = xTaskGetTickCount(),
+    };
+    if(type == HOST_TX_FOCUS_ACTION) {
+        portENTER_CRITICAL(&s_focus_lock);
+        message.op_id = s_next_op_id++;
+        if(s_next_op_id == 0) s_next_op_id = 1;
+        portEXIT_CRITICAL(&s_focus_lock);
+    }
+    if(xQueueSend(s_tx_queue, &message, 0) != pdTRUE) return ESP_ERR_NO_MEM;
+    if(op_id != NULL) *op_id = message.op_id;
+    return ESP_OK;
+}
+
+void watch_host_link_set_focus_active(bool active)
+{
+    s_focus_page_active = active;
+    if(s_tx_queue == NULL || s_state != WATCH_HOST_LINK_ONLINE) return;
+    host_tx_message_t message = {
+        .type = HOST_TX_FOCUS_STATE,
+        .flag = active,
+        .created_at = xTaskGetTickCount(),
+    };
+    (void)xQueueSend(s_tx_queue, &message, 0);
+    if(active) (void)queue_focus_message(HOST_TX_FOCUS_SYNC, WATCH_FOCUS_ACTION_START, NULL);
+}
+
+esp_err_t watch_host_link_request_focus_sync(void)
+{
+    return queue_focus_message(HOST_TX_FOCUS_SYNC, WATCH_FOCUS_ACTION_START, NULL);
+}
+
+esp_err_t watch_host_link_send_focus_action(watch_focus_action_t action,
+                                            uint32_t *op_id)
+{
+    if(!s_focus_page_active) return ESP_ERR_INVALID_STATE;
+    return queue_focus_message(HOST_TX_FOCUS_ACTION, action, op_id);
 }
 
 esp_err_t watch_host_link_send_presentation_action(bool next_page, uint32_t *op_id)
@@ -344,6 +471,30 @@ static bool send_presentation_action(int sock, const char *session,
     return ok;
 }
 
+static bool send_focus_message(int sock, const char *session,
+                               const host_tx_message_t *message)
+{
+    static const char *actions[] = {"start", "pause", "resume", "abort"};
+    cJSON *root = cJSON_CreateObject();
+    if(root == NULL) return false;
+    cJSON_AddNumberToObject(root, "v", HOST_LINK_PROTOCOL_VERSION);
+    cJSON_AddStringToObject(root, "session", session);
+    if(message->type == HOST_TX_FOCUS_STATE) {
+        cJSON_AddStringToObject(root, "type", "focus_page_state");
+        cJSON_AddBoolToObject(root, "active", message->flag);
+    } else if(message->type == HOST_TX_FOCUS_SYNC) {
+        cJSON_AddStringToObject(root, "type", "focus_sync");
+    } else {
+        cJSON_AddStringToObject(root, "type", "focus_control");
+        cJSON_AddNumberToObject(root, "op_id", message->op_id);
+        cJSON_AddStringToObject(root, "action", actions[message->focus_action]);
+        cJSON_AddNumberToObject(root, "ttl_ms", FOCUS_TTL_MS);
+    }
+    bool ok = socket_send_json(sock, root);
+    cJSON_Delete(root);
+    return ok;
+}
+
 static bool drain_tx_queue(int sock, const char *session)
 {
     host_tx_message_t message;
@@ -357,6 +508,12 @@ static bool drain_tx_queue(int sock, const char *session)
                 continue;
             }
             if(!send_presentation_action(sock, session, &message)) return false;
+        } else {
+            if(message.type == HOST_TX_FOCUS_ACTION &&
+               (xTaskGetTickCount() - message.created_at) > pdMS_TO_TICKS(FOCUS_TTL_MS)) {
+                continue;
+            }
+            if(!send_focus_message(sock, session, &message)) return false;
         }
     }
     return true;
@@ -412,6 +569,12 @@ static bool handle_line(int sock, const char *line, bool *authenticated,
             presentation_snapshot_result((uint32_t)op_id->valuedouble, result,
                                          cJSON_IsString(reason) ? reason->valuestring : "");
         }
+    } else if(strcmp(type->valuestring, "focus_snapshot") == 0) {
+        const cJSON *message_session = cJSON_GetObjectItem(root, "session");
+        if(*authenticated && cJSON_IsString(message_session) &&
+           strcmp(message_session->valuestring, session) == 0) {
+            focus_snapshot_update(root);
+        }
     }
 
     cJSON_Delete(root);
@@ -438,7 +601,7 @@ static void run_connection(int sock, const watch_config_t *cfg)
         fd_set read_set;
         FD_ZERO(&read_set);
         FD_SET(sock, &read_set);
-        uint32_t poll_ms = s_presentation_page_active ?
+        uint32_t poll_ms = (s_presentation_page_active || s_focus_page_active) ?
                            HOST_LINK_ACTIVE_POLL_MS : HOST_LINK_IDLE_POLL_MS;
         struct timeval timeout = {
             .tv_sec = poll_ms / 1000,
@@ -483,6 +646,15 @@ static void run_connection(int sock, const watch_config_t *cfg)
         if(authenticated && !page_state_synced) {
             if(!send_presentation_state(sock, session, s_presentation_page_active)) {
                 break;
+            }
+            host_tx_message_t focus_state = {
+                .type = HOST_TX_FOCUS_STATE,
+                .flag = s_focus_page_active,
+            };
+            if(!send_focus_message(sock, session, &focus_state)) break;
+            if(s_focus_page_active) {
+                focus_state.type = HOST_TX_FOCUS_SYNC;
+                if(!send_focus_message(sock, session, &focus_state)) break;
             }
             page_state_synced = true;
         }
@@ -555,6 +727,7 @@ esp_err_t watch_host_link_start(void)
         return ESP_ERR_NO_MEM;
     }
     presentation_snapshot_reset("");
+    memset(&s_focus_snapshot, 0, sizeof(s_focus_snapshot));
     s_started = true;
     BaseType_t ret = xTaskCreate(host_link_task, "host_link", HOST_LINK_TASK_STACK,
                                  NULL, HOST_LINK_TASK_PRIORITY, NULL);

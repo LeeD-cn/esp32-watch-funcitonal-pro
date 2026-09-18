@@ -58,3 +58,28 @@
 `outcome` 为 `processed` 或 `rejected`。常见拒绝原因包括 `disabled`、`watch_inactive`、`foreground_not_slideshow` 和 `send_input_failed`。`processed` 只表示 Windows 已接受模拟按键，不代表已读取并确认幻灯片页码变化。
 
 电脑仅在演示开关开启、手表页面活动、会话匹配，并且前台是 WPS 演示或 PowerPoint 的全屏放映窗口时执行 `Page Up` / `Page Down`。断线时瞬时请求清空，重连后不补发。
+
+## 协同专注（阶段 7）
+
+手表进入或退出协同页发送 `focus_page_state`；进入页和重连后发送 `focus_sync` 请求完整快照：
+
+```json
+{"v":1,"type":"focus_page_state","session":"...","active":true}
+{"v":1,"type":"focus_sync","session":"..."}
+```
+
+电脑创建并持有唯一当前任务，状态变化和运行中的整秒变化发送递增版本快照：
+
+```json
+{"v":1,"type":"focus_snapshot","session":"...","task_id":"uuid","version":8,"project":"复变函数习题","state":"running","planned_sec":1500,"focused_sec":42,"remaining_sec":1458}
+```
+
+`state` 为 `none`、`ready`、`running`、`paused`、`completed` 或 `aborted`。手表只接受版本不小于当前版本的快照，运行中可按本地单调时间插值剩余秒数，但到零仍等待电脑确认完成。
+
+两端控制最终都由电脑串行处理。手表请求格式如下，`action` 为 `start`、`pause`、`resume` 或 `abort`：
+
+```json
+{"v":1,"type":"focus_control","session":"...","op_id":27,"action":"pause","ttl_ms":2000}
+```
+
+电脑按当前会话和 `op_id` 去重，返回 `focus_result` 后再广播权威快照。断线时操作不补发；电脑计时与历史不受手表离页或临时断线影响。

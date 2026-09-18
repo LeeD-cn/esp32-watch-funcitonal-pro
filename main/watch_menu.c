@@ -6,7 +6,7 @@
  * ==================== 模块说明 ====================
  *  * 模块职责：
  * - 主菜单页面，负责菜单标题、图标切换和底部滑动指示器。
- * - 菜单项包含返回、番茄钟、游戏、设备信息、天气和指南针。
+ * - 菜单项包含返回、计时器、协同番茄钟、计步器、游戏、设备信息、天气、指南针和演示遥控。
  * - 页面支持中英文标题切换，字体根据当前语言选择中文字体或 Montserrat。
  * - 底部滑块根据当前 index 计算位置，用于提示用户当前所在菜单项。
  *
@@ -27,7 +27,7 @@
 #define WATCH_SCREEN_W          240
 #define WATCH_SCREEN_H          240
 
-#define MENU_ITEM_COUNT         7
+#define MENU_ITEM_COUNT         9
 
 #define MENU_TITLE_Y            13
 #define MENU_LINE_X             24
@@ -64,6 +64,7 @@ typedef struct {
     lv_obj_t *page;
     lv_obj_t *bg_img;
     lv_obj_t *title;
+    lv_obj_t *bitmap_title;
     lv_obj_t *icon_area;
     lv_obj_t *icon_cur;
 
@@ -86,7 +87,9 @@ typedef struct {
 
 static const menu_title_i18n_t s_menu_titles[MENU_ITEM_COUNT] = {
     {"Back", "返回"},
+    {"Timer", "计时器"},
     {"Tomato Clock", "番茄钟"},
+    {"Pedometer", "计步器"},
     {"Game", "游戏"},
     {"Device Info", "设备信息"},
     {"Weather", "天气"},
@@ -125,10 +128,10 @@ static const char *menu_title_text(uint8_t index)
  */
 static const lv_font_t *menu_title_font(void)
 {
-    if(watch_language_is_chinese() && s_menu.index == 3) {
+    if(watch_language_is_chinese() && s_menu.index == 5) {
         return &device_info_font_20;
     }
-    if(watch_language_is_chinese() && s_menu.index == 6) {
+    if(watch_language_is_chinese() && s_menu.index == 8) {
         return &presentation_font_20;
     }
     return watch_language_is_chinese() ? &cn_font_26 : &lv_font_montserrat_26;
@@ -136,15 +139,21 @@ static const lv_font_t *menu_title_font(void)
 
 LV_IMG_DECLARE(back_icon);
 LV_IMG_DECLARE(tomato_clock_icon);
+LV_IMG_DECLARE(timer_icon);
+LV_IMG_DECLARE(timer_title);
+LV_IMG_DECLARE(step_icon);
+LV_IMG_DECLARE(step_title);
 LV_IMG_DECLARE(game_icon);
 LV_IMG_DECLARE(e_card_icon);
 LV_IMG_DECLARE(weather_icon);
 LV_IMG_DECLARE(compass_icon);
 
 
-static const lv_img_dsc_t *s_menu_icons[6] = {
+static const lv_img_dsc_t *s_menu_icons[8] = {
     &back_icon,
+    &timer_icon,
     &tomato_clock_icon,
+    &step_icon,
     &game_icon,
     &e_card_icon,
     &weather_icon,
@@ -168,7 +177,7 @@ static lv_obj_t *menu_icon_create(lv_obj_t *parent, uint8_t index)
         return NULL;
     }
 
-    if(index < 6) {
+    if(index < 8) {
         lv_obj_t *icon = lv_img_create(parent);
         lv_img_set_src(icon, s_menu_icons[index]);
         lv_obj_align(icon, LV_ALIGN_CENTER, 0, 0);
@@ -270,8 +279,19 @@ static void menu_slider_create(lv_obj_t *parent)
 static void menu_update_current(void)
 {
     if(s_menu.title) {
-        lv_obj_set_style_text_font(s_menu.title, menu_title_font(), 0);
-        lv_label_set_text(s_menu.title, menu_title_text(s_menu.index));
+        bool bitmap_title = watch_language_is_chinese() &&
+                            (s_menu.index == 1 || s_menu.index == 3);
+        if(bitmap_title) {
+            lv_obj_add_flag(s_menu.title, LV_OBJ_FLAG_HIDDEN);
+            lv_img_set_src(s_menu.bitmap_title,
+                           s_menu.index == 1 ? &timer_title : &step_title);
+            lv_obj_clear_flag(s_menu.bitmap_title, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_menu.title, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_menu.bitmap_title, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_font(s_menu.title, menu_title_font(), 0);
+            lv_label_set_text(s_menu.title, menu_title_text(s_menu.index));
+        }
     }
 
     if(s_menu.icon_cur) {
@@ -336,6 +356,13 @@ lv_obj_t *watch_menu_create(lv_obj_t *parent)
     lv_label_set_text(s_menu.title, menu_title_text(0));
     lv_obj_set_width(s_menu.title, WATCH_SCREEN_W);
     lv_obj_set_pos(s_menu.title, 0, MENU_TITLE_Y);
+
+    s_menu.bitmap_title = lv_img_create(s_menu.page);
+    lv_img_set_src(s_menu.bitmap_title, &timer_title);
+    lv_obj_set_style_image_recolor(s_menu.bitmap_title, lv_color_white(), 0);
+    lv_obj_set_style_image_recolor_opa(s_menu.bitmap_title, LV_OPA_COVER, 0);
+    lv_obj_align(s_menu.bitmap_title, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_add_flag(s_menu.bitmap_title, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *line = lv_obj_create(s_menu.page);
     lv_obj_remove_style_all(line);
@@ -441,9 +468,19 @@ bool watch_menu_is_back_selected(void)
  *
  * @return 函数执行结果或计算得到的值，具体语义见返回路径。
  */
-bool watch_menu_is_tomato_clock_selected(void)
+bool watch_menu_is_timer_selected(void)
 {
     return s_menu.index == 1;
+}
+
+bool watch_menu_is_tomato_clock_selected(void)
+{
+    return s_menu.index == 2;
+}
+
+bool watch_menu_is_pedometer_selected(void)
+{
+    return s_menu.index == 3;
 }
 
 /**
@@ -456,7 +493,7 @@ bool watch_menu_is_tomato_clock_selected(void)
  */
 bool watch_menu_is_game_selected(void)
 {
-    return s_menu.index == 2;
+    return s_menu.index == 4;
 }
 
 /**
@@ -469,7 +506,7 @@ bool watch_menu_is_game_selected(void)
  */
 bool watch_menu_is_e_card_selected(void)
 {
-    return s_menu.index == 3;
+    return s_menu.index == 5;
 }
 
 /**
@@ -482,7 +519,7 @@ bool watch_menu_is_e_card_selected(void)
  */
 bool watch_menu_is_weather_selected(void)
 {
-    return s_menu.index == 4;
+    return s_menu.index == 6;
 }
 
 /**
@@ -495,12 +532,12 @@ bool watch_menu_is_weather_selected(void)
  */
 bool watch_menu_is_compass_selected(void)
 {
-    return s_menu.index == 5;
+    return s_menu.index == 7;
 }
 
 bool watch_menu_is_presentation_selected(void)
 {
-    return s_menu.index == 6;
+    return s_menu.index == 8;
 }
 
 /**

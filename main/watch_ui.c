@@ -22,6 +22,8 @@
 #include "watch_weather.h"
 #include "watch_compass.h"
 #include "watch_presentation.h"
+#include "watch_focus.h"
+#include "watch_pedometer.h"
 #include "watch_settings.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -51,6 +53,8 @@ void watch_e_card_destroy(void);
 void watch_weather_destroy(void);
 void watch_compass_destroy(void);
 void watch_presentation_destroy(void);
+void watch_focus_destroy(void);
+void watch_pedometer_destroy(void);
 void watch_settings_destroy(void);
 
 /**
@@ -67,6 +71,8 @@ typedef enum {
     UI_PAGE_WEATHER,
     UI_PAGE_COMPASS,
     UI_PAGE_PRESENTATION,
+    UI_PAGE_FOCUS,
+    UI_PAGE_PEDOMETER,
     UI_PAGE_SETTINGS,
 } ui_page_t;
 
@@ -86,6 +92,8 @@ typedef struct {
     lv_obj_t *weather_page;
     lv_obj_t *compass_page;
     lv_obj_t *presentation_page;
+    lv_obj_t *focus_page;
+    lv_obj_t *pedometer_page;
     lv_obj_t *settings_page;
 
     ui_page_t page;
@@ -129,6 +137,12 @@ static lv_obj_t **ui_page_slot(ui_page_t page)
 
     case UI_PAGE_PRESENTATION:
         return &s_ui.presentation_page;
+
+    case UI_PAGE_FOCUS:
+        return &s_ui.focus_page;
+
+    case UI_PAGE_PEDOMETER:
+        return &s_ui.pedometer_page;
 
     case UI_PAGE_SETTINGS:
         return &s_ui.settings_page;
@@ -203,6 +217,14 @@ static lv_obj_t *ui_create_page(ui_page_t page)
         *slot = watch_presentation_create(s_ui.scr);
         break;
 
+    case UI_PAGE_FOCUS:
+        *slot = watch_focus_create(s_ui.scr);
+        break;
+
+    case UI_PAGE_PEDOMETER:
+        *slot = watch_pedometer_create(s_ui.scr);
+        break;
+
     case UI_PAGE_SETTINGS:
         *slot = watch_settings_create(s_ui.scr);
         break;
@@ -271,6 +293,16 @@ static void ui_destroy_page(ui_page_t page)
 
     case UI_PAGE_PRESENTATION:
         watch_presentation_destroy();
+        *slot = NULL;
+        break;
+
+    case UI_PAGE_FOCUS:
+        watch_focus_destroy();
+        *slot = NULL;
+        break;
+
+    case UI_PAGE_PEDOMETER:
+        watch_pedometer_destroy();
         *slot = NULL;
         break;
 
@@ -483,6 +515,46 @@ static void switch_tomato_to_menu(void)
     lv_obj_move_foreground(s_ui.tomato_page);
 
     start_y_anim(s_ui.tomato_page, 0, WATCH_SCREEN_H, page_anim_done_cb);
+}
+
+static void switch_to_focus(void)
+{
+    if(s_ui.page != UI_PAGE_MENU || !ui_begin_switch(UI_PAGE_FOCUS)) return;
+    watch_focus_reset();
+    lv_obj_move_foreground(s_ui.focus_page);
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.focus_page, WATCH_SCREEN_H);
+    start_y_anim(s_ui.menu_page, 0, -WATCH_SCREEN_H, NULL);
+    start_y_anim(s_ui.focus_page, WATCH_SCREEN_H, 0, page_anim_done_cb);
+}
+
+static void switch_focus_to_menu(void)
+{
+    if(s_ui.page != UI_PAGE_FOCUS || !ui_begin_switch(UI_PAGE_MENU)) return;
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.focus_page, 0);
+    lv_obj_move_foreground(s_ui.focus_page);
+    start_y_anim(s_ui.focus_page, 0, WATCH_SCREEN_H, page_anim_done_cb);
+}
+
+static void switch_to_pedometer(void)
+{
+    if(s_ui.page != UI_PAGE_MENU || !ui_begin_switch(UI_PAGE_PEDOMETER)) return;
+    watch_pedometer_reset();
+    lv_obj_move_foreground(s_ui.pedometer_page);
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.pedometer_page, WATCH_SCREEN_H);
+    start_y_anim(s_ui.menu_page, 0, -WATCH_SCREEN_H, NULL);
+    start_y_anim(s_ui.pedometer_page, WATCH_SCREEN_H, 0, page_anim_done_cb);
+}
+
+static void switch_pedometer_to_menu(void)
+{
+    if(s_ui.page != UI_PAGE_PEDOMETER || !ui_begin_switch(UI_PAGE_MENU)) return;
+    lv_obj_set_y(s_ui.menu_page, 0);
+    lv_obj_set_y(s_ui.pedometer_page, 0);
+    lv_obj_move_foreground(s_ui.pedometer_page);
+    start_y_anim(s_ui.pedometer_page, 0, WATCH_SCREEN_H, page_anim_done_cb);
 }
 
 static void switch_to_game(void)
@@ -733,8 +805,14 @@ void watch_ui_on_key(watch_key_t key)
             if(watch_menu_is_back_selected()) {
                 switch_to_face();
             }
-            else if(watch_menu_is_tomato_clock_selected()) {
+            else if(watch_menu_is_timer_selected()) {
                 switch_to_tomato_clock();
+            }
+            else if(watch_menu_is_tomato_clock_selected()) {
+                switch_to_focus();
+            }
+            else if(watch_menu_is_pedometer_selected()) {
+                switch_to_pedometer();
             }
             else if(watch_menu_is_game_selected()) {
                 switch_to_game();
@@ -758,9 +836,7 @@ void watch_ui_on_key(watch_key_t key)
     if(s_ui.page == UI_PAGE_TOMATO_CLOCK) {
         watch_tomato_clock_on_key(key);
 
-        if(watch_tomato_clock_wants_back()) {
-            switch_tomato_to_menu();
-        }
+        if(watch_tomato_clock_wants_back()) switch_tomato_to_menu();
 
         return;
     }
@@ -808,6 +884,18 @@ void watch_ui_on_key(watch_key_t key)
     if(s_ui.page == UI_PAGE_PRESENTATION) {
         watch_presentation_on_key(key);
         if(watch_presentation_wants_back()) switch_presentation_to_menu();
+        return;
+    }
+
+    if(s_ui.page == UI_PAGE_FOCUS) {
+        watch_focus_on_key(key);
+        if(watch_focus_wants_back()) switch_focus_to_menu();
+        return;
+    }
+
+    if(s_ui.page == UI_PAGE_PEDOMETER) {
+        watch_pedometer_on_key(key);
+        if(watch_pedometer_wants_back()) switch_pedometer_to_menu();
         return;
     }
 

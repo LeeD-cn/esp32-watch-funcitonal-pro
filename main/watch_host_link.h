@@ -37,6 +37,34 @@ typedef struct {
     char reason[48];
 } watch_presentation_snapshot_t;
 
+typedef enum {
+    WATCH_FOCUS_NONE = 0,
+    WATCH_FOCUS_READY,
+    WATCH_FOCUS_RUNNING,
+    WATCH_FOCUS_PAUSED,
+    WATCH_FOCUS_COMPLETED,
+    WATCH_FOCUS_ABORTED,
+} watch_focus_state_t;
+
+typedef enum {
+    WATCH_FOCUS_ACTION_START = 0,
+    WATCH_FOCUS_ACTION_PAUSE,
+    WATCH_FOCUS_ACTION_RESUME,
+    WATCH_FOCUS_ACTION_ABORT,
+} watch_focus_action_t;
+
+typedef struct {
+    watch_focus_state_t state;
+    uint32_t version;
+    uint32_t planned_sec;
+    uint32_t focused_sec;
+    uint32_t remaining_sec;
+    uint32_t received_tick;
+    uint32_t revision;
+    char task_id[48];
+    char project[96];
+} watch_focus_snapshot_t;
+
 /** 启动后台连接任务；重复调用不会重复创建。 */
 esp_err_t watch_host_link_start(void);
 
@@ -54,6 +82,19 @@ esp_err_t watch_host_link_send_presentation_action(bool next_page, uint32_t *op_
 
 /** 复制电脑端演示开关及最近一次操作结果，供 LVGL 任务轮询显示。 */
 void watch_host_link_get_presentation_snapshot(watch_presentation_snapshot_t *snapshot);
+
+/** 告知电脑协同专注页面是否活动；重连时自动请求完整快照。 */
+void watch_host_link_set_focus_active(bool active);
+
+/** 请求电脑重发当前专注任务快照。 */
+esp_err_t watch_host_link_request_focus_sync(void);
+
+/** 发送专注控制请求；断线或离页时不缓存。 */
+esp_err_t watch_host_link_send_focus_action(watch_focus_action_t action,
+                                            uint32_t *op_id);
+
+/** 复制电脑端专注任务快照。 */
+void watch_host_link_get_focus_snapshot(watch_focus_snapshot_t *snapshot);
 
 #ifdef __cplusplus
 }

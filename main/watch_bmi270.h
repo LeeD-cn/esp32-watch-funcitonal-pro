@@ -52,6 +52,12 @@ typedef struct {
  */
 esp_err_t watch_bmi270_read_acceleration(watch_bmi270_accel_sample_t *sample);
 
+/** Enable the BMI270 wrist-worn hardware step counter. */
+esp_err_t watch_bmi270_step_counter_enable(void);
+
+/** Read the sensor's monotonic 32-bit step count since its last reset. */
+esp_err_t watch_bmi270_step_counter_read(uint32_t *steps);
+
 /* Diagnostic six-axis mode: raw native axes, ±4g and ±1000 degrees/s.
  * One caller owns begin/read/end; normal readers are suspended during this mode. */
 typedef struct {

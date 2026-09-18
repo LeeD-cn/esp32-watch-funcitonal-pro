@@ -3,11 +3,15 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDateTime>
+#include <QDir>
 #include <QFormLayout>
+#include <QCloseEvent>
+#include <QFile>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHostAddress>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,6 +19,7 @@
 #include <QNetworkInterface>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QRandomGenerator>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -22,7 +27,10 @@
 #include <QSerialPortInfo>
 #include <QSettings>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -110,16 +118,20 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_serial(new QSerialPort(this)),
       m_server(new QTcpServer(this)),
-      m_heartbeatTimer(new QTimer(this))
+      m_heartbeatTimer(new QTimer(this)),
+      m_focusTimer(new QTimer(this))
 {
     buildUi();
-    setWindowTitle("ESP-WATCH 上位机 - 阶段 8");
+    setWindowTitle("ESP-WATCH 上位机");
     resize(960, 720);
 
     connect(m_serial, &QSerialPort::readyRead, this, &MainWindow::consumeSerialData);
     connect(m_server, &QTcpServer::newConnection, this, &MainWindow::acceptClient);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &MainWindow::heartbeatTick);
     m_heartbeatTimer->setInterval(5000);
+    connect(m_focusTimer, &QTimer::timeout, this, &MainWindow::focusTick);
+    m_focusTimer->setInterval(250);
+    m_focusTimer->start();
 
     QSettings settings;
     m_hostPort->setValue(settings.value("network/port", 8765).toInt());
@@ -132,6 +144,8 @@ MainWindow::MainWindow(QWidget *parent)
     setSerialControlsEnabled(false);
     setWirelessStatus("服务未启动", "#777777");
     updatePresentationAvailability();
+    loadFocusHistory();
+    refreshFocusUi();
     m_addressHint->setText(localIpv4Text());
     appendLog("程序已启动。先开启电脑热点，再通过 USB 写入热点和无线服务配置。");
 }
@@ -149,7 +163,7 @@ void MainWindow::buildUi()
 {
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildConnectionPage(), "设备连接");
-    tabs->addTab(buildPlaceholderPage("专注任务", "阶段 7 将在此实现电脑主导的任务与计时状态。"), "专注任务");
+    tabs->addTab(buildFocusPage(), "专注任务");
     tabs->addTab(buildPresentationPage(), "演示遥控");
     setCentralWidget(tabs);
 }
@@ -184,6 +198,70 @@ QWidget *MainWindow::buildPresentationPage()
 
     connect(m_presentationEnabled, &QCheckBox::toggled, this,
             [this](bool enabled) { setPresentationEnabled(enabled); });
+    return page;
+}
+
+QWidget *MainWindow::buildFocusPage()
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+
+    auto *createGroup = new QGroupBox("新建专注任务");
+    auto *createLayout = new QHBoxLayout(createGroup);
+    m_focusProject = new QLineEdit;
+    m_focusProject->setPlaceholderText("项目名称，例如：复变函数习题");
+    m_focusMinutes = new QSpinBox;
+    m_focusMinutes->setRange(1, 720);
+    m_focusMinutes->setValue(25);
+    m_focusMinutes->setSuffix(" 分钟");
+    m_focusCreate = new QPushButton("创建任务");
+    createLayout->addWidget(m_focusProject, 1);
+    createLayout->addWidget(m_focusMinutes);
+    createLayout->addWidget(m_focusCreate);
+
+    auto *currentGroup = new QGroupBox("当前任务");
+    auto *currentLayout = new QVBoxLayout(currentGroup);
+    m_focusConnection = new QLabel("手表连接：离线");
+    m_focusCurrentProject = new QLabel("尚未创建任务");
+    m_focusCurrentProject->setWordWrap(true);
+    m_focusCurrentProject->setStyleSheet("font-size:22px;font-weight:600;");
+    m_focusRemaining = new QLabel("00:00");
+    m_focusRemaining->setAlignment(Qt::AlignCenter);
+    m_focusRemaining->setStyleSheet("font-size:52px;font-weight:600;color:#3b82f6;");
+    m_focusStateLabel = new QLabel("状态：无任务");
+    m_focusStateLabel->setAlignment(Qt::AlignCenter);
+    auto *buttons = new QHBoxLayout;
+    m_focusToggle = new QPushButton("开始");
+    m_focusAbort = new QPushButton("结束任务");
+    buttons->addStretch();
+    buttons->addWidget(m_focusToggle);
+    buttons->addWidget(m_focusAbort);
+    buttons->addStretch();
+    currentLayout->addWidget(m_focusConnection);
+    currentLayout->addWidget(m_focusCurrentProject);
+    currentLayout->addWidget(m_focusRemaining);
+    currentLayout->addWidget(m_focusStateLabel);
+    currentLayout->addLayout(buttons);
+
+    auto *historyGroup = new QGroupBox("专注历史");
+    auto *historyLayout = new QVBoxLayout(historyGroup);
+    m_focusHistoryTable = new QTableWidget(0, 4);
+    m_focusHistoryTable->setHorizontalHeaderLabels({"项目", "计划", "实际", "结果"});
+    m_focusHistoryTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_focusHistoryTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_focusHistoryTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_focusHistoryTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_focusHistoryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_focusHistoryTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    historyLayout->addWidget(m_focusHistoryTable);
+
+    layout->addWidget(createGroup);
+    layout->addWidget(currentGroup);
+    layout->addWidget(historyGroup, 1);
+
+    connect(m_focusCreate, &QPushButton::clicked, this, &MainWindow::createFocusTask);
+    connect(m_focusToggle, &QPushButton::clicked, this, &MainWindow::toggleFocusTask);
+    connect(m_focusAbort, &QPushButton::clicked, this, &MainWindow::abortFocusTask);
     return page;
 }
 
@@ -544,12 +622,16 @@ void MainWindow::handleClientMessage(const QJsonObject &object)
         m_watchPresentationActive = false;
         m_presentationResults.clear();
         m_presentationResultOrder.clear();
+        m_focusResults.clear();
+        m_focusResultOrder.clear();
         setPresentationEnabled(false, false);
         updatePresentationAvailability();
         m_connectedDevice->setText(QString("当前设备：%1（%2）")
                                    .arg(object.value("device_name").toString(), deviceId));
         setWirelessStatus("手表已连接", "#16833a");
         appendLog("手表认证成功，设备 ID：" + deviceId);
+        refreshFocusUi();
+        sendFocusSnapshot();
         return;
     }
 
@@ -574,6 +656,16 @@ void MainWindow::handleClientMessage(const QJsonObject &object)
                                               "手表已退出演示遥控页面。");
     } else if(type == "presentation_control") {
         handlePresentationControl(object);
+    } else if(type == "focus_page_state") {
+        if(object.value("session").toString() == m_sessionId &&
+           object.value("active").isBool()) {
+            m_watchFocusActive = object.value("active").toBool();
+            if(m_watchFocusActive) sendFocusSnapshot();
+        }
+    } else if(type == "focus_sync") {
+        if(object.value("session").toString() == m_sessionId) sendFocusSnapshot();
+    } else if(type == "focus_control") {
+        handleFocusControl(object);
     } else {
         appendLog("收到尚未在阶段 6 启用的消息：" + type);
     }
@@ -609,13 +701,17 @@ void MainWindow::disconnectClient()
     }
     m_authenticated = false;
     m_watchPresentationActive = false;
+    m_watchFocusActive = false;
     setPresentationEnabled(false, false);
     m_presentationResults.clear();
     m_presentationResultOrder.clear();
+    m_focusResults.clear();
+    m_focusResultOrder.clear();
     updatePresentationAvailability();
     m_clientBuffer.clear();
     m_connectedDevice->setText("当前设备：无");
     if(m_server->isListening()) setWirelessStatus("服务已启动，等待手表", "#d28b00");
+    refreshFocusUi();
 }
 
 void MainWindow::setPresentationEnabled(bool enabled, bool notifyWatch)
@@ -697,6 +793,270 @@ void MainWindow::handlePresentationControl(const QJsonObject &object)
         m_presentationRecent->setText("最近指令：已拒绝（" + displayReason + "）");
         appendLog(QString("演示指令 #%1 已拒绝：%2。").arg(opId).arg(displayReason));
     }
+}
+
+void MainWindow::createFocusTask()
+{
+    const QString project = m_focusProject->text().trimmed();
+    if(project.isEmpty()) {
+        QMessageBox::warning(this, "缺少项目名称", "请输入本次专注的项目名称。");
+        return;
+    }
+    if(m_focusState == FocusState::Ready || m_focusState == FocusState::Running ||
+       m_focusState == FocusState::Paused) {
+        QMessageBox::information(this, "已有任务", "请先完成或结束当前任务。");
+        return;
+    }
+
+    m_focusTaskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_focusTaskProject = project.left(80);
+    m_focusPlannedMs = qint64(m_focusMinutes->value()) * 60 * 1000;
+    m_focusAccumulatedMs = 0;
+    m_focusState = FocusState::Ready;
+    m_focusRunClock.invalidate();
+    m_focusLastBroadcastSecond = -1;
+    ++m_focusVersion;
+    m_focusProject->clear();
+    refreshFocusUi();
+    sendFocusSnapshot();
+    appendLog("已创建专注任务：" + m_focusTaskProject);
+}
+
+void MainWindow::toggleFocusTask()
+{
+    if(m_focusState == FocusState::Ready || m_focusState == FocusState::Paused) {
+        m_focusState = FocusState::Running;
+        m_focusRunClock.start();
+    } else if(m_focusState == FocusState::Running) {
+        m_focusAccumulatedMs += m_focusRunClock.elapsed();
+        m_focusRunClock.invalidate();
+        m_focusState = FocusState::Paused;
+    } else {
+        return;
+    }
+    m_focusLastBroadcastSecond = -1;
+    ++m_focusVersion;
+    refreshFocusUi();
+    sendFocusSnapshot();
+}
+
+void MainWindow::abortFocusTask()
+{
+    if(m_focusState != FocusState::Ready && m_focusState != FocusState::Running &&
+       m_focusState != FocusState::Paused) return;
+    if(QMessageBox::question(this, "结束专注", "确定中途结束本次专注吗？",
+                             QMessageBox::Yes | QMessageBox::No,
+                             QMessageBox::No) != QMessageBox::Yes) return;
+    finishFocusTask(false);
+}
+
+void MainWindow::focusTick()
+{
+    qint64 focused = m_focusAccumulatedMs;
+    if(m_focusState == FocusState::Running && m_focusRunClock.isValid()) {
+        focused += m_focusRunClock.elapsed();
+        if(focused >= m_focusPlannedMs) {
+            finishFocusTask(true);
+            return;
+        }
+    }
+    refreshFocusUi();
+    const qint64 second = focused / 1000;
+    if(m_focusState == FocusState::Running && second != m_focusLastBroadcastSecond) {
+        m_focusLastBroadcastSecond = second;
+        ++m_focusVersion;
+        sendFocusSnapshot();
+    }
+}
+
+void MainWindow::refreshFocusUi()
+{
+    if(!m_focusRemaining) return;
+    qint64 focused = m_focusAccumulatedMs;
+    if(m_focusState == FocusState::Running && m_focusRunClock.isValid()) {
+        focused += m_focusRunClock.elapsed();
+    }
+    const qint64 remaining = qMax<qint64>(0, m_focusPlannedMs - focused);
+    const qint64 seconds = (remaining + 999) / 1000;
+    m_focusRemaining->setText(QString("%1:%2")
+        .arg(seconds / 60, 2, 10, QLatin1Char('0'))
+        .arg(seconds % 60, 2, 10, QLatin1Char('0')));
+    m_focusCurrentProject->setText(m_focusTaskProject.isEmpty() ?
+                                   "尚未创建任务" : m_focusTaskProject);
+    const QString state = m_focusState == FocusState::Ready ? "待开始" :
+        m_focusState == FocusState::Running ? "专注中" :
+        m_focusState == FocusState::Paused ? "已暂停" :
+        m_focusState == FocusState::Completed ? "已完成" :
+        m_focusState == FocusState::Aborted ? "已中止" : "无任务";
+    m_focusStateLabel->setText(QString("状态：%1　计划：%2 分钟　有效专注：%3 分 %4 秒")
+        .arg(state).arg(m_focusPlannedMs / 60000).arg(focused / 60000)
+        .arg((focused / 1000) % 60));
+    m_focusConnection->setText(m_authenticated ? "手表连接：在线" : "手表连接：离线（电脑仍继续计时）");
+    m_focusConnection->setStyleSheet(m_authenticated ? "color:#16833a;" : "color:#777777;");
+    const bool active = m_focusState == FocusState::Ready ||
+                        m_focusState == FocusState::Running ||
+                        m_focusState == FocusState::Paused;
+    m_focusCreate->setEnabled(!active);
+    m_focusProject->setEnabled(!active);
+    m_focusMinutes->setEnabled(!active);
+    m_focusToggle->setEnabled(active);
+    m_focusAbort->setEnabled(active);
+    m_focusToggle->setText(m_focusState == FocusState::Running ? "暂停" :
+                           m_focusState == FocusState::Paused ? "继续" : "开始");
+}
+
+void MainWindow::sendFocusSnapshot()
+{
+    if(!m_authenticated) return;
+    qint64 focused = m_focusAccumulatedMs;
+    if(m_focusState == FocusState::Running && m_focusRunClock.isValid()) {
+        focused += m_focusRunClock.elapsed();
+    }
+    focused = qMin(focused, m_focusPlannedMs);
+    const qint64 remaining = qMax<qint64>(0, m_focusPlannedMs - focused);
+    const QString state = m_focusState == FocusState::Ready ? "ready" :
+        m_focusState == FocusState::Running ? "running" :
+        m_focusState == FocusState::Paused ? "paused" :
+        m_focusState == FocusState::Completed ? "completed" :
+        m_focusState == FocusState::Aborted ? "aborted" : "none";
+    sendClientJson({{"v", kProtocolVersion}, {"type", "focus_snapshot"},
+                    {"session", m_sessionId}, {"task_id", m_focusTaskId},
+                    {"version", int(m_focusVersion)}, {"project", m_focusTaskProject},
+                    {"state", state}, {"planned_sec", m_focusPlannedMs / 1000},
+                    {"focused_sec", focused / 1000},
+                    {"remaining_sec", (remaining + 999) / 1000}});
+}
+
+void MainWindow::handleFocusControl(const QJsonObject &object)
+{
+    const QString session = object.value("session").toString();
+    const double rawId = object.value("op_id").toDouble(-1);
+    const QString action = object.value("action").toString();
+    if(session != m_sessionId || rawId < 1 || rawId > 4294967295.0) return;
+    const quint32 opId = quint32(rawId);
+    if(m_focusResults.contains(opId)) {
+        sendClientJson(m_focusResults.value(opId));
+        sendFocusSnapshot();
+        return;
+    }
+
+    bool accepted = false;
+    if(action == "start" && m_focusState == FocusState::Ready) {
+        toggleFocusTask();
+        accepted = true;
+    } else if(action == "pause" && m_focusState == FocusState::Running) {
+        toggleFocusTask();
+        accepted = true;
+    } else if(action == "resume" && m_focusState == FocusState::Paused) {
+        toggleFocusTask();
+        accepted = true;
+    } else if(action == "abort" && (m_focusState == FocusState::Ready ||
+              m_focusState == FocusState::Running || m_focusState == FocusState::Paused)) {
+        finishFocusTask(false);
+        accepted = true;
+    }
+    QJsonObject result{{"v", kProtocolVersion}, {"type", "focus_result"},
+                       {"session", m_sessionId}, {"op_id", int(opId)},
+                       {"outcome", accepted ? "processed" : "rejected"},
+                       {"reason", accepted ? "ok" : "invalid_state"}};
+    m_focusResults.insert(opId, result);
+    m_focusResultOrder.append(opId);
+    if(m_focusResultOrder.size() > kPresentationResultCache) {
+        m_focusResults.remove(m_focusResultOrder.takeFirst());
+    }
+    sendClientJson(result);
+    sendFocusSnapshot();
+}
+
+void MainWindow::finishFocusTask(bool completed)
+{
+    if(m_focusState == FocusState::Running && m_focusRunClock.isValid()) {
+        m_focusAccumulatedMs += m_focusRunClock.elapsed();
+    }
+    m_focusRunClock.invalidate();
+    if(completed) m_focusAccumulatedMs = m_focusPlannedMs;
+    m_focusAccumulatedMs = qMin(m_focusAccumulatedMs, m_focusPlannedMs);
+    m_focusState = completed ? FocusState::Completed : FocusState::Aborted;
+    ++m_focusVersion;
+
+    bool exists = false;
+    for(const QJsonObject &entry : m_focusHistory) {
+        if(entry.value("task_id").toString() == m_focusTaskId) exists = true;
+    }
+    if(!exists && !m_focusTaskId.isEmpty()) {
+        m_focusHistory.prepend({{"task_id", m_focusTaskId},
+            {"project", m_focusTaskProject}, {"planned_sec", m_focusPlannedMs / 1000},
+            {"focused_sec", m_focusAccumulatedMs / 1000},
+            {"result", completed ? "completed" : "aborted"},
+            {"finished_at", QDateTime::currentDateTime().toString(Qt::ISODate)}});
+        saveFocusHistory();
+        refreshFocusHistory();
+    }
+    refreshFocusUi();
+    sendFocusSnapshot();
+}
+
+void MainWindow::loadFocusHistory()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QFile file(dir + "/focus_history.json");
+    if(file.open(QIODevice::ReadOnly)) {
+        const QJsonArray array = QJsonDocument::fromJson(file.readAll()).array();
+        QSet<QString> ids;
+        for(const QJsonValue &value : array) {
+            const QJsonObject item = value.toObject();
+            const QString id = item.value("task_id").toString();
+            if(!id.isEmpty() && !ids.contains(id)) {
+                ids.insert(id);
+                m_focusHistory.append(item);
+            }
+        }
+    }
+    refreshFocusHistory();
+}
+
+void MainWindow::saveFocusHistory() const
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    QJsonArray array;
+    for(const QJsonObject &item : m_focusHistory) array.append(item);
+    QSaveFile file(dir + "/focus_history.json");
+    if(file.open(QIODevice::WriteOnly)) {
+        file.write(QJsonDocument(array).toJson(QJsonDocument::Indented));
+        file.commit();
+    }
+}
+
+void MainWindow::refreshFocusHistory()
+{
+    if(!m_focusHistoryTable) return;
+    m_focusHistoryTable->setRowCount(m_focusHistory.size());
+    for(int row = 0; row < m_focusHistory.size(); ++row) {
+        const QJsonObject item = m_focusHistory.at(row);
+        const qint64 planned = item.value("planned_sec").toInteger();
+        const qint64 focused = item.value("focused_sec").toInteger();
+        const QString result = item.value("result").toString() == "completed" ? "完成" : "中止";
+        m_focusHistoryTable->setItem(row, 0, new QTableWidgetItem(item.value("project").toString()));
+        m_focusHistoryTable->setItem(row, 1, new QTableWidgetItem(QString("%1 分").arg(planned / 60)));
+        m_focusHistoryTable->setItem(row, 2, new QTableWidgetItem(QString("%1:%2")
+            .arg(focused / 60).arg(focused % 60, 2, 10, QLatin1Char('0'))));
+        m_focusHistoryTable->setItem(row, 3, new QTableWidgetItem(result));
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if(m_focusState == FocusState::Running || m_focusState == FocusState::Paused) {
+        if(QMessageBox::question(this, "退出上位机", "当前专注尚未结束。退出将中止并记录任务，是否继续？",
+                                 QMessageBox::Yes | QMessageBox::No,
+                                 QMessageBox::No) != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+        finishFocusTask(false);
+    }
+    event->accept();
 }
 
 void MainWindow::setWirelessStatus(const QString &text, const QString &color)

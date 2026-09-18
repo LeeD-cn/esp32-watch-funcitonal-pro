@@ -486,7 +486,7 @@ static void tomato_apply_language(bool force)
                                    chinese ? &tomato_preset_font_20 : &lv_font_montserrat_20,
                                    0);
         lv_label_set_text(s_tomato.time_set_label,
-                          chinese ? "时间设置" : "Time Set");
+                          chinese ? "时间" : "Time Set");
         lv_obj_set_pos(s_tomato.time_set_label, 48, TOMATO_TOP_Y + 2);
     }
 
@@ -918,7 +918,6 @@ static void tomato_preset_render_list(void)
     tomato_preset_set_title(s_tomato.language_chinese ? "保存的时钟" : "Saved Timers");
     tomato_preset_hide_all_lines();
     tomato_preset_set_line(0, s_tomato.language_chinese ? "< 返回" : "< Back");
-
     for(int i = 0; i < WATCH_TOMATO_PRESET_COUNT; ++i) {
         if(s_tomato.presets[i].valid) {
             tomato_preset_format_time(s_tomato.presets[i].seconds,
@@ -2067,6 +2066,7 @@ bool watch_tomato_clock_wants_back(void)
      */
     return s_tomato.wants_back;
 }
+
 
 
 /* 维护提示

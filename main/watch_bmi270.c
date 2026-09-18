@@ -56,6 +56,8 @@
 #define BMI270_REG_INT2_IO_CTRL     0x54
 #define BMI270_REG_INT_LATCH        0x55
 #define BMI270_REG_INT_MAP_DATA     0x58
+#define BMI270_REG_FEAT_PAGE        0x2F
+#define BMI270_REG_FEAT_DATA        0x30
 
 /* BMI270 上电后必须加载 Bosch 配置文件。 */
 #include "bmi270_config_file.h"
@@ -73,26 +75,33 @@
 #define BMI270_PWR_CONF_NORMAL      0x00
 #define BMI270_PWR_CTRL_ACC_ONLY    0x04
 
+/* Bosch BMI270 base configuration: wrist step-counter input is on feature
+ * page 6 at byte 2; its enable flag is byte 3 bit 4. Output is page 0 byte 0. */
+#define BMI270_FEAT_PAGE_SIZE       16
+#define BMI270_STEP_INPUT_PAGE      6
+#define BMI270_STEP_ENABLE_BYTE     3
+#define BMI270_STEP_ENABLE_MASK     0x10
+#define BMI270_STEP_OUTPUT_PAGE     0
+
 /* INT 输出配置为 active-high、push-pull，并同时映射到 INT1/INT2。 */
 #define BMI270_INT_ACTIVE_HIGH_PP   0x0A
 #define BMI270_INT_MAP_DRDY_INT1    0x04
 #define BMI270_INT_MAP_DRDY_INT2    0x40
 #define BMI270_INT_MAP_DRDY_BOTH    (BMI270_INT_MAP_DRDY_INT1 | BMI270_INT_MAP_DRDY_INT2)
 
-/* 抬腕检测参数，单位主要为 ms 或 mg。 */
-#define BMI270_WAKE_SAMPLE_MS       40      /* 25Hz */
-#define BMI270_WAKE_WARMUP_SAMPLES  6       /* 息屏后先丢掉约 240ms，避开按键松手晃动 */
-#define BMI270_WAKE_MIN_ARM_MOTION  160     /* mg，任意两帧差值超过这个值认为手腕开始运动 */
-#define BMI270_WAKE_MIN_Z_RISE      100     /* mg，相比息屏基线，屏幕朝上/朝人方向明显增加 */
+/* 抬腕检测参数，主循环约 5 Hz 采样。 */
+#define BMI270_WAKE_WARMUP_SAMPLES  2       /* 息屏后约 400ms 更新基线，避开按键松手 */
+#define BMI270_WAKE_MIN_ARM_MOTION  220     /* mg，先确认一次明确的手腕运动 */
+#define BMI270_WAKE_MOTION_WINDOW   12      /* 运动后约 2.4s 内必须完成目标姿态 */
+#define BMI270_WAKE_MIN_Z_RISE      160     /* mg，相比息屏基线，屏幕朝用户方向明显增加 */
 #define BMI270_WAKE_FACE_MIN_Z      650     /* mg，屏幕法线至少有一定朝上分量 */
-#define BMI270_WAKE_STABLE_DELTA    450     /* mg，满足姿态后连续稳定几帧才亮屏 */
-#define BMI270_WAKE_STABLE_SAMPLES  1
+#define BMI270_WAKE_STABLE_DELTA    260     /* mg，目标姿态需要真正稳定下来 */
+#define BMI270_WAKE_STABLE_SAMPLES  2       /* 连续约 400ms 确认，过滤瞬时晃动 */
 #define BMI270_WAKE_TOTAL_MIN       600     /* mg，排除读数异常 */
 #define BMI270_WAKE_TOTAL_MAX       1900    /* mg，排除剧烈甩动 */
 #define BMI270_WAKE_Y_DROP          380     /* mg，抬腕时 Y 轴通常明显下降 */
-#define BMI270_WAKE_Y_NEGATIVE      (-80)   /* mg，Y 轴转负时通常朝向用户 */
-#define BMI270_WAKE_POSE_DELTA      430     /* mg，兜底：整体姿态变化量 */
-#define BMI270_WAKE_DEBUG_EVERY     5       /* 约 200ms 打印一次调试数据 */
+#define BMI270_WAKE_POSE_DELTA      320     /* mg，拒绝只有单轴噪声的微小姿态变化 */
+#define BMI270_WAKE_DEBUG_EVERY     25      /* 最多约 5 秒打印一次调试数据 */
 
 static const char *TAG = "watch_bmi270";
 
@@ -117,6 +126,7 @@ static int16_t s_last_y = 0;
 static int16_t s_last_z = 0;
 static bool s_last_valid = false;
 static bool s_seen_motion = false;
+static uint8_t s_motion_window_left = 0;
 static uint8_t s_warmup_left = 0;
 static uint8_t s_stable_count = 0;
 static uint8_t s_debug_log_count = 0;
@@ -520,6 +530,47 @@ esp_err_t watch_bmi270_read_acceleration(watch_bmi270_accel_sample_t *sample)
     return ret;
 }
 
+static esp_err_t bmi270_feature_page_read(uint8_t page, uint8_t data[BMI270_FEAT_PAGE_SIZE])
+{
+    esp_err_t ret = bmi270_write_u8(BMI270_REG_FEAT_PAGE, page);
+    return ret == ESP_OK ?
+           bmi270_read(BMI270_REG_FEAT_DATA, data, BMI270_FEAT_PAGE_SIZE) : ret;
+}
+
+esp_err_t watch_bmi270_step_counter_enable(void)
+{
+    if(!s_bmi270_ready) return ESP_ERR_INVALID_STATE;
+
+    uint8_t feature[BMI270_FEAT_PAGE_SIZE];
+    esp_err_t ret = bmi270_feature_page_read(BMI270_STEP_INPUT_PAGE, feature);
+    if(ret != ESP_OK) return ret;
+
+    feature[BMI270_STEP_ENABLE_BYTE] |= BMI270_STEP_ENABLE_MASK;
+    ret = bmi270_write_burst(BMI270_REG_FEAT_DATA, feature, sizeof(feature));
+    if(ret != ESP_OK) return ret;
+
+    vTaskDelay(pdMS_TO_TICKS(2));
+    ret = bmi270_feature_page_read(BMI270_STEP_INPUT_PAGE, feature);
+    if(ret != ESP_OK) return ret;
+    return (feature[BMI270_STEP_ENABLE_BYTE] & BMI270_STEP_ENABLE_MASK) != 0 ?
+           ESP_OK : ESP_FAIL;
+}
+
+esp_err_t watch_bmi270_step_counter_read(uint32_t *steps)
+{
+    if(steps == NULL) return ESP_ERR_INVALID_ARG;
+    if(!s_bmi270_ready) return ESP_ERR_INVALID_STATE;
+
+    uint8_t feature[BMI270_FEAT_PAGE_SIZE];
+    esp_err_t ret = bmi270_feature_page_read(BMI270_STEP_OUTPUT_PAGE, feature);
+    if(ret != ESP_OK) return ret;
+    *steps = (uint32_t)feature[0] |
+             ((uint32_t)feature[1] << 8) |
+             ((uint32_t)feature[2] << 16) |
+             ((uint32_t)feature[3] << 24);
+    return ESP_OK;
+}
+
 esp_err_t watch_bmi270_motion_end(void)
 {
     if(!atomic_load(&s_motion_active)) return ESP_OK;
@@ -682,6 +733,7 @@ void watch_bmi270_raise_wrist_begin(void)
     s_raise_active = false;
     s_last_valid = false;
     s_seen_motion = false;
+    s_motion_window_left = 0;
     s_warmup_left = BMI270_WAKE_WARMUP_SAMPLES;
     s_stable_count = 0;
     s_debug_log_count = 0;
@@ -763,20 +815,25 @@ bool watch_bmi270_raise_wrist_poll(void)
     s_last_y = y;
     s_last_z = z;
 
-    if(frame_delta >= BMI270_WAKE_MIN_ARM_MOTION || pose_delta >= BMI270_WAKE_POSE_DELTA) {
+    if(frame_delta >= BMI270_WAKE_MIN_ARM_MOTION) {
         s_seen_motion = true;
+        s_motion_window_left = BMI270_WAKE_MOTION_WINDOW;
+    }
+    else if(s_motion_window_left > 0) {
+        s_motion_window_left--;
+        if(s_motion_window_left == 0) {
+            s_seen_motion = false;
+        }
     }
 
     int total_abs = abs((int)x) + abs((int)y) + abs((int)z);
     bool gravity_ok = (total_abs >= BMI270_WAKE_TOTAL_MIN) && (total_abs <= BMI270_WAKE_TOTAL_MAX);
 
-    /* 综合 Z 轴抬升、Y 轴下降和整体姿态变化判断抬腕。 */
-    bool z_lift = (z >= BMI270_WAKE_FACE_MIN_Z) && (z_rise >= BMI270_WAKE_MIN_Z_RISE);
-    bool y_turn = (z >= BMI270_WAKE_FACE_MIN_Z) && (y_drop >= BMI270_WAKE_Y_DROP);
-    bool y_negative = (z >= BMI270_WAKE_FACE_MIN_Z) && (y <= BMI270_WAKE_Y_NEGATIVE);
-    bool pose_turn = (z >= BMI270_WAKE_FACE_MIN_Z) && (pose_delta >= BMI270_WAKE_POSE_DELTA);
-
-    bool face_towards_user = z_lift || y_turn || y_negative || pose_turn;
+    /* 必须从息屏基线明确转到面向用户的姿态，不能由单次轻微晃动直接触发。 */
+    bool deliberate_turn = z_rise >= BMI270_WAKE_MIN_Z_RISE ||
+                           y_drop >= BMI270_WAKE_Y_DROP;
+    bool face_towards_user = z >= BMI270_WAKE_FACE_MIN_Z && deliberate_turn &&
+                             pose_delta >= BMI270_WAKE_POSE_DELTA;
     bool stable_enough = frame_delta <= BMI270_WAKE_STABLE_DELTA;
 
     s_debug_log_count++;
@@ -835,6 +892,7 @@ void watch_bmi270_raise_wrist_end(void)
 {
     s_raise_active = false;
     s_seen_motion = false;
+    s_motion_window_left = 0;
     s_stable_count = 0;
     s_debug_log_count = 0;
 }

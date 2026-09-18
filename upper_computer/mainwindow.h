@@ -11,6 +11,7 @@
 
 class QComboBox;
 class QCheckBox;
+class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -19,6 +20,7 @@ class QSerialPort;
 class QSpinBox;
 class QTcpServer;
 class QTcpSocket;
+class QTableWidget;
 class QTimer;
 
 class MainWindow : public QMainWindow
@@ -27,10 +29,14 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private:
     void buildUi();
     QWidget *buildConnectionPage();
     QWidget *buildPresentationPage();
+    QWidget *buildFocusPage();
     QWidget *buildPlaceholderPage(const QString &title, const QString &description);
 
     void refreshSerialPorts();
@@ -54,6 +60,17 @@ private:
     void setPresentationEnabled(bool enabled, bool notifyWatch = true);
     void updatePresentationAvailability();
     void handlePresentationControl(const QJsonObject &object);
+    void createFocusTask();
+    void toggleFocusTask();
+    void abortFocusTask();
+    void handleFocusControl(const QJsonObject &object);
+    void focusTick();
+    void sendFocusSnapshot();
+    void refreshFocusUi();
+    void finishFocusTask(bool completed);
+    void loadFocusHistory();
+    void saveFocusHistory() const;
+    void refreshFocusHistory();
     void appendLog(const QString &text);
     QString localIpv4Text() const;
     QString createPairToken() const;
@@ -101,6 +118,31 @@ private:
     bool m_watchPresentationActive = false;
     QHash<quint32, QJsonObject> m_presentationResults;
     QList<quint32> m_presentationResultOrder;
+
+    enum class FocusState { None, Ready, Running, Paused, Completed, Aborted };
+    QLineEdit *m_focusProject;
+    QSpinBox *m_focusMinutes;
+    QPushButton *m_focusCreate;
+    QLabel *m_focusConnection;
+    QLabel *m_focusCurrentProject;
+    QLabel *m_focusRemaining;
+    QLabel *m_focusStateLabel;
+    QPushButton *m_focusToggle;
+    QPushButton *m_focusAbort;
+    QTableWidget *m_focusHistoryTable;
+    QTimer *m_focusTimer;
+    QElapsedTimer m_focusRunClock;
+    FocusState m_focusState = FocusState::None;
+    QString m_focusTaskId;
+    QString m_focusTaskProject;
+    qint64 m_focusPlannedMs = 0;
+    qint64 m_focusAccumulatedMs = 0;
+    quint32 m_focusVersion = 0;
+    qint64 m_focusLastBroadcastSecond = -1;
+    bool m_watchFocusActive = false;
+    QList<QJsonObject> m_focusHistory;
+    QHash<quint32, QJsonObject> m_focusResults;
+    QList<quint32> m_focusResultOrder;
 };
 
 #endif

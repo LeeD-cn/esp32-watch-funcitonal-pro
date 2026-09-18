@@ -38,6 +38,7 @@
 #include "watch_config.h"
 #include "watch_device_info.h"
 #include "watch_imu_capture.h"
+#include "watch_steps.h"
 
 /* 大图采用 watch_config.c 的流式写入接口，避免占用大块连续 RAM。 */
 extern esp_err_t watch_config_image_stream_begin(const char *name, int w, int h, size_t size);
@@ -727,6 +728,17 @@ static void handle_command(cJSON *root)
         } else {
             watch_imu_capture_run((unsigned)seconds->valueint, (unsigned)delay->valueint, serial_write_capture_line);
         }
+    } else if(strcmp(cmd, "get_steps") == 0) {
+        watch_steps_snapshot_t steps;
+        char reply[192];
+        watch_steps_get_snapshot(&steps);
+        snprintf(reply, sizeof(reply),
+                 "{\"steps\":%lu,\"sensor_steps\":%lu,\"date\":%lu,"
+                 "\"running\":%s,\"error\":%ld}",
+                 (unsigned long)steps.today, (unsigned long)steps.sensor_total,
+                 (unsigned long)steps.date_key, steps.running ? "true" : "false",
+                 (long)steps.error);
+        serial_write_line(reply);
     } else if(strcmp(cmd, "set_config") == 0) {
         handle_set_config(root);
     } else if(strcmp(cmd, "get_config") == 0) {

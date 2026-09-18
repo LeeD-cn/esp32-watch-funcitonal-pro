@@ -21,6 +21,7 @@
 #include "watch_bmi270.h"
 #include "watch_imu_capture.h"
 #include "watch_gesture.h"
+#include "watch_steps.h"
 #include "watch_config.h"
 #include "watch_serial_config.h"
 #include "watch_host_link.h"
@@ -28,6 +29,7 @@
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include "sdkconfig.h"
 
 #define WATCH_LVGL_TASK_STACK_SIZE  8192
@@ -41,6 +43,8 @@
 #define KEY4_DEBOUNCE_MS            60
 #define KEY4_LONG_PRESS_MS          1200
 #define AUTO_OFF_IDLE_MS            15000
+#define SLEEP_MOTION_POLL_MS         200
+#define SLEEP_KEY_POLL_US            ((uint64_t)SLEEP_MOTION_POLL_MS * 1000ULL)
 
 /* 1：使用 ESP light sleep；0：使用轮询待机并保持 CPU/USB 活跃。 */
 #define WATCH_USE_ESP_LIGHT_SLEEP     1
@@ -57,6 +61,15 @@ static esp_lcd_panel_handle_t s_lcd_panel = NULL;
 static bool s_watch_sleeping = false;
 /* LVGL tick 重置标志。 */
 static bool s_lvgl_tick_reset_needed = false;
+
+/**
+ * @brief 判断电池当前是否正在充电。
+ */
+static bool watch_is_charging(void)
+{
+    bool charging = false;
+    return watch_battery_is_charging(&charging) == ESP_OK && charging;
+}
 
 /**
  * @brief 判断按键事件是否应重置自动息屏计时。
@@ -258,13 +271,17 @@ static void watch_power_off(void)
 {
     watch_gesture_stop();
     watch_imu_capture_suspend(true);
+    (void)watch_steps_flush();
     watch_display_set_on(false);
     power_hold_force_off();
 
-    while(1) {
-        (void)gpio_set_level(POWER_HOLD_GPIO, 0);
+    /* 电池供电会在此处断电；若 USB 仍供电，则保留再次按键开机的能力。 */
+    key4_wait_release();
+    while(!key4_is_pressed()) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+
+    esp_restart();
 }
 
 /**
@@ -272,7 +289,7 @@ static void watch_power_off(void)
  *
  * @return 短按释放后返回 true；未形成有效短按时返回 false。
  */
-static bool watch_sleep_handle_key4_interrupt(void)
+static bool watch_sleep_handle_key4_interrupt(bool allow_power_off)
 {
     vTaskDelay(pdMS_TO_TICKS(KEY4_DEBOUNCE_MS));
     if(!key4_is_pressed()) {
@@ -284,7 +301,8 @@ static bool watch_sleep_handle_key4_interrupt(void)
     while(key4_is_pressed()) {
         TickType_t now = xTaskGetTickCount();
 
-        if((now - press_tick) >= pdMS_TO_TICKS(KEY4_LONG_PRESS_MS)) {
+        if(allow_power_off &&
+           (now - press_tick) >= pdMS_TO_TICKS(KEY4_LONG_PRESS_MS)) {
             watch_power_off();
             return false;
         }
@@ -297,28 +315,21 @@ static bool watch_sleep_handle_key4_interrupt(void)
 }
 
 /**
- * @brief 配置 KEY4 和 BMI270 的 GPIO 唤醒源。
+ * @brief 配置 KEY4 GPIO 唤醒源。
  *
  * @return ESP_OK 表示配置成功，否则返回对应错误码。
  */
 static esp_err_t watch_sleep_gpio_wakeup_enable(void)
 {
-    /* KEY4 低电平、BMI270 INT 高电平触发唤醒。 */
+    /* 抬腕改由低频定时采样确认，避免 25 Hz data-ready 高频唤醒 CPU。 */
     esp_err_t ret = gpio_wakeup_enable(KEY4_GPIO, GPIO_INTR_LOW_LEVEL);
     if(ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = gpio_wakeup_enable(BMI270_INT_GPIO, GPIO_INTR_HIGH_LEVEL);
-    if(ret != ESP_OK) {
-        (void)gpio_wakeup_disable(KEY4_GPIO);
         return ret;
     }
 
     ret = esp_sleep_enable_gpio_wakeup();
     if(ret != ESP_OK) {
         (void)gpio_wakeup_disable(KEY4_GPIO);
-        (void)gpio_wakeup_disable(BMI270_INT_GPIO);
         return ret;
     }
 
@@ -333,6 +344,7 @@ static void watch_sleep_gpio_wakeup_disable(void)
     (void)gpio_wakeup_disable(KEY4_GPIO);
     (void)gpio_wakeup_disable(BMI270_INT_GPIO);
     (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 }
 
 /**
@@ -342,15 +354,20 @@ static void watch_sleep_gpio_wakeup_disable(void)
  */
 static bool watch_sleep_wait_key4_or_raise_wrist(void)
 {
+    /* 充电时保持 CPU 轮询，避免 USB 供电下 light sleep 后 KEY4 无法唤醒。 */
+    bool charging = watch_is_charging();
 #if WATCH_USE_ESP_LIGHT_SLEEP
-    bool gpio_wakeup_enabled = (watch_sleep_gpio_wakeup_enable() == ESP_OK);
+    bool gpio_wakeup_enabled = !charging &&
+                               (watch_sleep_gpio_wakeup_enable() == ESP_OK);
 #else
     bool gpio_wakeup_enabled = false;
 #endif
+    TickType_t last_motion_poll = xTaskGetTickCount() -
+                                  pdMS_TO_TICKS(SLEEP_MOTION_POLL_MS);
 
     while(1) {
         if(key4_is_pressed()) {
-            if(watch_sleep_handle_key4_interrupt()) {
+            if(watch_sleep_handle_key4_interrupt(!charging)) {
                 if(gpio_wakeup_enabled) {
                     watch_sleep_gpio_wakeup_disable();
                 }
@@ -361,7 +378,9 @@ static bool watch_sleep_wait_key4_or_raise_wrist(void)
             continue;
         }
 
-        if(gpio_get_level(BMI270_INT_GPIO) == 1) {
+        TickType_t now = xTaskGetTickCount();
+        if((now - last_motion_poll) >= pdMS_TO_TICKS(SLEEP_MOTION_POLL_MS)) {
+            last_motion_poll = now;
             if(watch_bmi270_raise_wrist_poll()) {
                 if(gpio_wakeup_enabled) {
                     watch_sleep_gpio_wakeup_disable();
@@ -369,13 +388,12 @@ static bool watch_sleep_wait_key4_or_raise_wrist(void)
                 return true;
             }
 
-            /* poll() 同时读取并清除非抬腕的数据就绪中断。 */
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
         }
 
         if(gpio_wakeup_enabled) {
 #if WATCH_USE_ESP_LIGHT_SLEEP
+            /* 定时回退可覆盖 USB 供电时偶发丢失的 GPIO 唤醒。 */
+            (void)esp_sleep_enable_timer_wakeup(SLEEP_KEY_POLL_US);
             (void)esp_light_sleep_start();
 #endif
         }
@@ -397,6 +415,7 @@ static void watch_enter_light_sleep_until_key4(void)
 
     watch_gesture_stop();
     watch_imu_capture_suspend(true);
+    watch_steps_set_suspended(true);
     s_watch_sleeping = true;
 
     power_hold_keep_on();
@@ -411,14 +430,7 @@ static void watch_enter_light_sleep_until_key4(void)
     key4_wait_release();
     watch_bmi270_raise_wrist_begin();
 
-    if(watch_bmi270_enable_data_ready_interrupt(true) != ESP_OK) {
-        /* BMI270 中断配置失败时仅保留 KEY4 唤醒。 */
-        (void)gpio_intr_disable(BMI270_INT_GPIO);
-        (void)gpio_set_intr_type(BMI270_INT_GPIO, GPIO_INTR_DISABLE);
-    }
-
     if(watch_sleep_wait_key4_or_raise_wrist()) {
-        (void)watch_bmi270_enable_data_ready_interrupt(false);
         key4_wait_release();
         power_hold_keep_on();
         watch_keys_clear_events();
@@ -432,6 +444,7 @@ static void watch_enter_light_sleep_until_key4(void)
         watch_display_set_on(true);
         s_watch_sleeping = false;
         watch_imu_capture_suspend(false);
+        watch_steps_set_suspended(false);
     }
 }
 
@@ -569,6 +582,7 @@ void app_main(void)
     (void)watch_rtc_restore_or_init_2026();
     (void)watch_battery_init();
     (void)watch_bmi270_init();
+    (void)watch_steps_start();
 
     /* 在后台校时和上位机连接任务启动前串行初始化一次 Wi-Fi，避免两个任务并发创建网络资源。 */
     (void)watch_wifi_init();

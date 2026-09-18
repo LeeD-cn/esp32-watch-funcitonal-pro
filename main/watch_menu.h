@@ -37,12 +37,12 @@ bool watch_menu_is_back_selected(void);
  * @brief 重置菜单选择到默认项。
  */
 void watch_menu_reset(void);
-/**
- * @brief 判断当前是否选择番茄钟。
- *
- * @return true 已选择番茄钟。
- */
+/** 判断当前是否选择本地计时器。 */
+bool watch_menu_is_timer_selected(void);
+/** 判断当前是否选择电脑协同番茄钟。 */
 bool watch_menu_is_tomato_clock_selected(void);
+/** 判断当前是否选择计步器。 */
+bool watch_menu_is_pedometer_selected(void);
 /**
  * @brief 判断当前是否选择游戏。
  *
